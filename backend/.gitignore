@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.env
+.venv/
+
+# Scratch files and tests
+scratch_analyze.py
+scratch_out.txt
+test_extractor.py
+test_aetna_output.txt
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Project-specific data exclusions
+# It's best practice not to track generated outputs or large raw PDFs in Git
+data/output/
+data/input_pdfs/
+data/manual_samples/
+
+# Note: data/templates/ is typically tracked if it contains master blank templates
+data/
