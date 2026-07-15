@@ -1718,13 +1718,14 @@ class RulesEngine:
                         has_pharmacy_deductible_no_tiers = True  # NEW: Found deductible amount
                     
                     # Now parse the specific sentence: "Deductible does not apply to Tier X drugs"
-                    # Pattern: "Deductible does not apply to Tier 1 drugs", "Tier 1 and Tier 2", "Tier 1, Tier 2 and Tier 3"
-                    deductible_pattern = r"deductible\s+does\s+(?:not\s+)?apply\s+to\s+((?:tier\s+\d+\s*(?:and|,)?\s*)+(?:tier\s+\d+)?)"
+                    # Pattern: "Deductible does not apply to Tier 1 drugs", "Tier 1 and Tier 2", "Tier 1, 2 and 3"
+                    # FIXED: Make "deductible" optional and handle standalone numbers like "Tier 1 and 2"
+                    deductible_pattern = r"(?:deductible\s+)?does\s+(?:not\s+)?apply\s+to\s+(tier\s+\d+(?:\s*(?:and|or|,)\s*(?:tier\s+)?\d+)*)"
                     deductible_match = re.search(deductible_pattern, answer_section, re.IGNORECASE)
                     if deductible_match:
                         tier_list_text = deductible_match.group(1)
-                        # Extract all tier numbers mentioned: "tier 1 and tier 2 and tier 3" -> [1, 2, 3]
-                        tier_numbers = re.findall(r"tier\s+(\d+)", tier_list_text, re.IGNORECASE)
+                        # Extract all tier numbers mentioned: "tier 1 and 2" -> [1, 2]
+                        tier_numbers = re.findall(r"\b(\d+)\b", tier_list_text)
                         tier_deductible_waivers = set(int(t) for t in tier_numbers)
                         has_pharmacy_deductible_no_tiers = False  # NEW: Tiers were mentioned, so reset flag
             
@@ -1761,7 +1762,7 @@ class RulesEngine:
                     pharmacy[coins_mod_key] = "Rx - After Rx Deductible"
                     status = "(tier does not exist)" if not tier_exists else ""
                     print(f"    [PHARMACY-DEDUCTIBLE-RULE2] Tier {tier_num}: Set to 'Rx - After Rx Deductible' (pharmacy deductible applies to all tiers) {status}")
-                elif tier_deductible_waivers:
+                elif tier_deductible_waivers and tier_num not in tier_deductible_waivers:
                     # Other tiers (not in waiver list) but pharmacy deductible exists -> After Rx Deductible
                     pharmacy[copay_mod_key] = "Rx - After Rx Deductible"
                     pharmacy[coins_mod_key] = "Rx - After Rx Deductible"
