@@ -129,8 +129,15 @@ class RulesEngine:
         plan_type = schema_data.get('plan_information', {}).get('plan_type')
         if plan_type:
             print(f"    [OK] Plan Type: {plan_type}")
+            if "hsa" in str(plan_type).lower() or "hdhp" in str(plan_type).lower():
+                schema_data['plan_information']['hdhp'] = True
+                print("    [FIX] Forced hdhp to True because plan_type indicates HSA/HDHP")
         else:
             print(f"    [WARN] Plan Type: null")
+            
+        if plan_name and ("hsa" in str(plan_name).lower() or "hdhp" in str(plan_name).lower()):
+            schema_data['plan_information']['hdhp'] = True
+            print("    [FIX] Forced hdhp to True because plan_name indicates HSA/HDHP")
         
         # Check deductible
         ded = schema_data.get('deductibles_and_coinsurance', {}).get('individual_deductible')
@@ -1585,7 +1592,23 @@ class RulesEngine:
                     urgent_care_labs['lab_services_coinsurance_deductible_status'] = xray_coin_status
                 print(f"    [FIX-LAB-XRAY-SYNC] lab_services_coinsurance: Updated from '0%' to '{xray_coin}', modifier synced to '{xray_mod}'")
         
-        # CRITICAL FIX: Validate pharmacy tier values to ensure they come from In-Network column ONLY
+        # Phase 3.6: Designated Network Override
+        # If raw text has "Designated Lab: $X  Lab: $Y" -> use $Y; "Designated: $X  Network: Y%" -> clear copay
+        if raw_text_path and isinstance(urgent_care_labs, dict):
+            try:
+                with open(raw_text_path, 'r', encoding='utf-8') as rf:
+                    raw_content = rf.read()
+                lab_m = re.search(r'Designated Lab:.*?Lab:\s*(\$[\d,]+)\s*copay', raw_content, re.IGNORECASE | re.DOTALL)
+                if lab_m:
+                    urgent_care_labs['lab_services_copay'] = lab_m.group(1)
+                    print(f"    [DESIGNATED-FIX] lab_services_copay -> '{lab_m.group(1)}' (Designated Lab ignored)")
+                img_m = re.search(r'Designated:\s*\$[\d,]+.*?Network:\s*([\d]+%)\s*coinsurance', raw_content, re.IGNORECASE | re.DOTALL)
+                if img_m:
+                    urgent_care_labs['medical_imaging_copay'] = '$0'
+                    print(f"    [DESIGNATED-FIX] medical_imaging_copay cleared (Designated ignored, Network coinsurance kept)")
+            except Exception:
+                pass
+
         # This prevents out-of-network pharmacy coinsurance from bleeding into in-network tier fields
         def _validate_pharmacy_in_network_only(schema_data, raw_lines):
             """
@@ -1729,6 +1752,13 @@ class RulesEngine:
                         tier_deductible_waivers = set(int(t) for t in tier_numbers)
                         has_pharmacy_deductible_no_tiers = False  # NEW: Tiers were mentioned, so reset flag
             
+            # If the LLM copied the medical deductible into the pharmacy deductible, they are integrated! Clear it.
+            ind_ded = schema_data.get('deductibles_and_coinsurance', {}).get('individual_deductible')
+            rx_ded = pharmacy.get('pharmacy_deductible')
+            if rx_ded and ind_ded and rx_ded == ind_ded:
+                pharmacy['pharmacy_deductible'] = None
+                print(f"    [FIX] Pharmacy Deductible matched Medical Deductible ({ind_ded}) - cleared because they are integrated")
+
             # Assign modifier for pharmacy deductible field itself (not tier-specific)
             if pharmacy.get('pharmacy_deductible'):
                 pharmacy['pharmacy_deductible_modifier'] = "Rx - After Rx Deductible"
@@ -1745,11 +1775,32 @@ class RulesEngine:
                 tier_exists = bool(copay_val or coins_val)
 
                 # Determine modifier based on tier-specific deductible waivers, HDHP, or default
+                def is_rx_meaningful(val):
+                    """True only if value has an actual dollar amount (not null, not 0%)."""
+                    if not val:
+                        return False
+                    v = str(val).strip()
+                    return v not in ["", "0%", "$0", "$0.00", "none"]
+
+                def is_rx_zero(val):
+                    """True if value is explicitly 0% (cost exists but is zero = waived)."""
+                    if not val:
+                        return False
+                    v = str(val).strip()
+                    return v in ["0%", "$0", "$0.00"]
+
                 if hdhp:
-                    pharmacy[copay_mod_key] = "Rx - After Plan Deductible"
-                    pharmacy[coins_mod_key] = "Rx - After Plan Deductible"
+                    # Meaningful value (e.g. $10, $35) -> After Plan Deductible
+                    if is_rx_meaningful(copay_val):
+                        pharmacy[copay_mod_key] = "Rx - After Plan Deductible"
+                    elif is_rx_zero(copay_val):
+                        pharmacy[copay_mod_key] = "Rx - Deductible Waived"
+                    if is_rx_meaningful(coins_val):
+                        pharmacy[coins_mod_key] = "Rx - After Plan Deductible"
+                    elif is_rx_zero(coins_val):
+                        pharmacy[coins_mod_key] = "Rx - Deductible Waived"
                     status = "(tier does not exist)" if not tier_exists else ""
-                    print(f"    [HDHP] Tier {tier_num}: Set to 'Rx - After Plan Deductible' {status}")
+                    print(f"    [HDHP] Tier {tier_num}: modifiers assigned based on values {status}")
                 elif tier_num in tier_deductible_waivers:
                     # Tier explicitly mentioned in "Deductible does not apply to Tier X" -> Waived
                     pharmacy[copay_mod_key] = "Rx - Deductible Waived"
@@ -1890,7 +1941,10 @@ class RulesEngine:
                     if t5_specialty:
                         pharmacy['tier_5_copay'] = t5_specialty
                         pharmacy['tier_5_coinsurance'] = None
-                        print(f"    [SPECIALTY] 4-tier plan: Applied Tier 4 specialty '{t5_specialty}' -> Tier 5 Copay")
+                        # Set modifier immediately since this value is populated AFTER the initial modifier loop
+                        if hdhp:
+                            pharmacy['tier_5_copay_modifier'] = "Rx - After Plan Deductible"
+                        print(f"    [SPECIALTY] 4-tier plan: Applied Tier 4 specialty '{t5_specialty}' -> Tier 5 Copay (modifier set)")
 
                     # Build description: $T1/$T2/$T3/$T4
                     desc_parts = [
@@ -2287,7 +2341,8 @@ class RulesEngine:
         # Validate Pharmacy with Dropdown Verification
         print("\n  [SECTION 4/6] Pharmacy (with Validation & Auto-Correction):")
         pharmacy = schema_data.get('pharmacy', {})
-        
+
+
         valid_pharmacy_modifiers = [
             "Rx - After Plan Deductible", 
             "Rx - After Rx Deductible", 
@@ -2535,6 +2590,17 @@ class RulesEngine:
             except Exception as e:
                 print(f"    [WARN] Could not check Tier 4: {e}")
         
+        # HDHP final sweep: after all GLOBAL-VAL (including Tier 5 recovery), set correct modifiers
+        if hdhp:
+            for t in range(1, 6):
+                for field in ['copay', 'coinsurance']:
+                    val = pharmacy.get(f'tier_{t}_{field}')
+                    v = str(val).strip() if val else ""
+                    if v and v not in ["0%", "$0", "$0.00"]:
+                        pharmacy[f'tier_{t}_{field}_modifier'] = "Rx - After Plan Deductible"
+                    else:
+                        pharmacy[f'tier_{t}_{field}_modifier'] = "Rx - Deductible Waived"
+
         # Auto-populate current_plans_entry for ALL services (if not already set)
         print("  [AUTO-POPULATE] Filling current_plans_entry for all services...")
         self._populate_all_current_plans_entries(schema_data)
@@ -2569,38 +2635,7 @@ class RulesEngine:
             val_str = str(value).strip().lower()
             return val_str not in ["$0", "0%", "", "none", "$0.00"]
         
-        # FIRST: Fix special cases where extraction picked wrong values
-        # Lab Services: 20% coinsurance is from OUT-OF-NETWORK column, not IN-NETWORK
-        # IN-NETWORK has NO coinsurance for lab (only copay)
-        urgent_imaging = schema_data.get('urgent_care_labs_imaging', {})
-        if urgent_imaging.get('lab_services_coinsurance') == "20%":
-            # This 20% is from OUT-OF-NETWORK, not IN-NETWORK
-            # IN-NETWORK lab has copay only, no coinsurance
-            urgent_imaging['lab_services_coinsurance'] = "0%"
-            print("    [FIX] lab_services_coinsurance: Corrected from '20%' to '0%' (IN-NETWORK column has no coinsurance, 20% is OUT-OF-NETWORK)")
-        
-        # X-Ray: 20% coinsurance is from OUT-OF-NETWORK column, not IN-NETWORK
-        # IN-NETWORK has NO coinsurance for xray (only copay)
-        if urgent_imaging.get('xray_coinsurance') == "20%":
-            # This 20% is from OUT-OF-NETWORK, not IN-NETWORK
-            # IN-NETWORK xray has copay only, no coinsurance
-            urgent_imaging['xray_coinsurance'] = "0%"
-            print("    [FIX] xray_coinsurance: Corrected from '20%' to '0%' (IN-NETWORK column has no coinsurance, 20% is OUT-OF-NETWORK)")
-        
-        # Medical Imaging: Fix coinsurance from 50% (Network) to 0% (Designated Network)
-        if urgent_imaging.get('medical_imaging_coinsurance') == "50%":
-            # This is from the Network tier, not Designated Network tier
-            # Designated Network has 0% coinsurance (only $400 copay)
-            urgent_imaging['medical_imaging_coinsurance'] = "0%"
-            print("    [FIX] medical_imaging_coinsurance: Corrected from '50%' to '0%' (using Designated Network tier)")
-        
-        # NOW: Clear the old current_plans_entry fields so they get recalculated with corrected coinsurance values
-        for service in ['lab_services', 'xray', 'medical_imaging', 'er']:
-            entry_key = f"{service}_current_plans_entry"
-            if urgent_imaging.get(entry_key):
-                # Clear so it gets recalculated with the corrected coinsurance values
-                urgent_imaging[entry_key] = None
-                print(f"    [RESET] {entry_key}: Cleared for recalculation with corrected coinsurance")
+        # Removed hardcoded coinsurance overrides (which were setting 20% -> 0% for lab/xray blindly)
         
         def is_meaningful_cost(value):
             """Check if a cost value is meaningful (not $0, 0%, or empty)."""
@@ -2653,3 +2688,14 @@ class RulesEngine:
                         entry_value = coins
                         section[entry_key] = entry_value
                         print(f"    [AUTO] {section_name}/{service}: Set {entry_key} = '{entry_value}' (coinsurance only, copay is {copay})")
+                    
+                    # Rule 4: NEITHER is meaningful (both $0 or 0%)
+                    elif not copay_meaningful and not coins_meaningful:
+                        if copay:
+                            entry_value = copay
+                        elif coins:
+                            entry_value = coins
+                        else:
+                            entry_value = "$0"
+                        section[entry_key] = entry_value
+                        print(f"    [AUTO] {section_name}/{service}: Set {entry_key} = '{entry_value}' (neither meaningful, copay={copay}, coins={coins})")
