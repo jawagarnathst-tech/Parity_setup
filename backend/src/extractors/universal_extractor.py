@@ -297,8 +297,8 @@ class UniversalExtractor:
 
     def _extract_pdf(self, file_path: str) -> str:
         text = ""
-        print("  [Extraction] Using: pdfplumber (Native PDF Parsing)")
         with pdfplumber.open(file_path) as pdf:
+            num_pages = len(pdf.pages) if pdf.pages else 1
             for i, page in enumerate(pdf.pages):
                 t = page.extract_text()
                 if t:
@@ -313,10 +313,11 @@ class UniversalExtractor:
                             text += " | ".join(clean_row) + "\n"
                     text += "\n"
 
-        # If extracted text is very short, it's likely a scanned PDF. Trigger full OCR.
-        if len(text.strip()) < 150:
-            print(f"  [Extraction] Switched to: Full OCR (Tesseract) due to low text volume ({len(text)} chars).")
-            print(f"  [OCR] Attempting full OCR on {os.path.basename(file_path)}...")
+        # If extracted text is very short or has low text density, it's likely a scanned PDF. Trigger full OCR.
+        alnum_count = len(re.findall(r'[a-zA-Z0-9]', text))
+        avg_alnum_per_page = alnum_count / num_pages
+        if alnum_count < 150 or avg_alnum_per_page < 60:
+            print(f"  [OCR] Low text volume detected ({alnum_count} chars, avg {avg_alnum_per_page:.1f}/page). Attempting full OCR on {os.path.basename(file_path)}...")
             text = ocr_pdf_full(file_path)
 
         if self._needs_ocr_header(text):

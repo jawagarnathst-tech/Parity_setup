@@ -27,9 +27,43 @@ def ocr_pdf_header(pdf_path: str, page_number: int = 0, header_height_ratio: flo
         return pytesseract.image_to_string(header_image, lang='eng').strip()
 
 def ocr_pdf_full(pdf_path: str, resolution: int = 300) -> str:
-    """Perform full OCR on all pages of a PDF."""
+    """Perform full OCR on all pages of a PDF, attempting rostaing-ocr first and falling back to pytesseract."""
+    text = ""
+    
+    # 1. Try rostaing-ocr
+    try:
+        print(f"    [OCR] Attempting layout-aware extraction with rostaing-ocr...")
+        from rostaing_ocr import ocr_extractor
+        import uuid
+        
+        # Create a unique temporary file path for rostaing-ocr output
+        temp_dir = os.path.dirname(pdf_path)
+        temp_filename = f"temp_rostaing_{uuid.uuid4().hex}.txt"
+        temp_out = os.path.join(temp_dir, temp_filename)
+        
+        ocr_extractor(pdf_path, output_file=temp_out)
+        
+        if os.path.exists(temp_out):
+            with open(temp_out, "r", encoding="utf-8") as f:
+                text = f.read()
+            try:
+                os.remove(temp_out)
+            except Exception as e_del:
+                print(f"    [OCR WARN] Could not delete temp file {temp_out}: {e_del}")
+                
+        if text.strip():
+            print(f"    [OCR] Successfully extracted text using rostaing-ocr")
+            return text
+        else:
+            print(f"    [OCR WARN] rostaing-ocr returned empty text. Falling back to pytesseract.")
+            
+    except Exception as e:
+        print(f"    [OCR WARN] rostaing-ocr failed or is not available: {e}. Falling back to pytesseract.")
+
+    # 2. Fallback to pytesseract
     text = ""
     try:
+        print(f"    [OCR] Processing with pytesseract...")
         with pdfplumber.open(pdf_path) as pdf:
             for i, page in enumerate(pdf.pages):
                 print(f"    [OCR] Processing page {i+1}/{len(pdf.pages)}...")

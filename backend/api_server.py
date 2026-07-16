@@ -35,10 +35,12 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("api_server")
 
+BACKEND_DIR = Path(__file__).resolve().parent
+
 # Global task store (in production, use database or Redis)
 TASKS = {}
-UPLOAD_DIR = Path("data/uploads")
-OUTPUT_DIR = Path("data/output")
+UPLOAD_DIR = BACKEND_DIR / "data/uploads"
+OUTPUT_DIR = BACKEND_DIR / "data/output"
 
 # Ensure directories exist
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -216,7 +218,7 @@ async def run_extraction(task_id: str, file_path: Path, filename: str):
         print("  ⏳ [Step 4/5] Generating final Excel mapping...")
         logger.info("  [Pipeline] Step 4: Generating Excel output...")
         TASKS[task_id]["progress"] = 90
-        template_folder = Path("data/Template")
+        template_folder = BACKEND_DIR / "data/Template"
         sample_template = template_folder / "sample template.xlsx"
         default_template = template_folder / "Current Plan - Template.xlsx"
 
@@ -227,7 +229,7 @@ async def run_extraction(task_id: str, file_path: Path, filename: str):
         else:
             raise FileNotFoundError(f"No template found in {template_folder}")
 
-        writer = ExcelWriter("configs/template_mapping.json")
+        writer = ExcelWriter(str(BACKEND_DIR / "configs/template_mapping.json"))
         excel_path = OUTPUT_DIR / "05_final_excel" / f"{task_id}.xlsx"
         excel_path.parent.mkdir(parents=True, exist_ok=True)
         writer.write_consolidated([validated_dict], template_path, str(excel_path))
@@ -363,8 +365,7 @@ if __name__ == "__main__":
     local_ip = get_local_ip()
     print(f"Starting SBC Intellect API Server on http://{local_ip}:{available_port} (also http://localhost:{available_port})")
 
-    # Write the chosen port into frontend/.env so Vite uses the correct API URL
-    frontend_env_path = Path("../frontend/.env")
+    frontend_env_path = BACKEND_DIR.parent / "Frontend" / ".env"
     try:
         frontend_env_path.parent.mkdir(parents=True, exist_ok=True)
         with open(frontend_env_path, "w", encoding="utf-8") as f:
