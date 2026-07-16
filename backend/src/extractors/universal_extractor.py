@@ -297,6 +297,7 @@ class UniversalExtractor:
 
     def _extract_pdf(self, file_path: str) -> str:
         text = ""
+        print("  [Extraction] Using: pdfplumber (Native PDF Parsing)")
         with pdfplumber.open(file_path) as pdf:
             for i, page in enumerate(pdf.pages):
                 t = page.extract_text()
@@ -314,7 +315,8 @@ class UniversalExtractor:
 
         # If extracted text is very short, it's likely a scanned PDF. Trigger full OCR.
         if len(text.strip()) < 150:
-            print(f"  [OCR] Low text volume detected ({len(text)} chars). Attempting full OCR on {os.path.basename(file_path)}...")
+            print(f"  [Extraction] Switched to: Full OCR (Tesseract) due to low text volume ({len(text)} chars).")
+            print(f"  [OCR] Attempting full OCR on {os.path.basename(file_path)}...")
             text = ocr_pdf_full(file_path)
 
         if self._needs_ocr_header(text):
@@ -329,6 +331,7 @@ class UniversalExtractor:
         if not docx:
             print("  [ERR] python-docx not installed. Skipping Word file.")
             return ""
+        print("  [Extraction] Using: python-docx (Word Parsing)")
         doc = docx.Document(file_path)
         text = ""
         for i, para in enumerate(doc.paragraphs):
@@ -344,6 +347,7 @@ class UniversalExtractor:
         return text
 
     def _extract_image(self, file_path: str) -> str:
+        print("  [Extraction] Using: OCR (Tesseract) for Image")
         print(f"  [OCR] Processing image {os.path.basename(file_path)}...")
         return ocr_image(file_path)
 
