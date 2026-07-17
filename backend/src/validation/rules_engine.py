@@ -321,7 +321,10 @@ class RulesEngine:
             for i, part in enumerate(parts):
                 if re.search(r'\$\s*[\d,]+(?:\.\d+)?|\d+\s*%', part):
                     cost_indices.append(i)
-                elif re.search(r'no charge|not applicable', part, re.IGNORECASE):
+                elif re.search(r'no charge', part, re.IGNORECASE):
+                    # Only treat "no charge" as a cost column (means $0).
+                    # "Not Applicable" is Anthem-specific and means the column
+                    # doesn't apply to that service — NOT a real cost value.
                     cost_indices.append(i)
             
             if not cost_indices:
