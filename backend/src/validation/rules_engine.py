@@ -1246,6 +1246,31 @@ class RulesEngine:
                             copay_status_val = ""
                             print(f"    [LAB-XRAY-EARLY-SANITY] {section_name}/{copay_base}: Cleared deductible status (not in copay value)")
 
+                    # ==========================================
+                    # SCENARIO-03: HDHP Check (Highest Priority)
+                    # ==========================================
+                    if hdhp:
+                        section[copay_mod_key] = "After Deductible"
+                        section[coins_mod_key] = "After Deductible"
+                        section[copay_status_key] = ""
+                        section[coins_status_key] = ""
+                        
+                        # Preserve value-filling from Limitation Scenarios
+                        limitation_copay, _ = _extract_limitation_copay_amount(copay_base)
+                        if limitation_copay:
+                            coins_is_zero = (coins_value == '0%')
+                            coins_is_positive = (coins_value and coins_value != '0%' and coins_value not in ['', 'None', None])
+                            
+                            if coins_is_zero and not copay_value:
+                                section[copay_base] = limitation_copay
+                            elif coins_is_positive:
+                                current_plans_entry_key = f"{copay_base.replace('_copay', '')}_current_plans_entry"
+                                section[current_plans_entry_key] = f"{limitation_copay} + {coins_value}"
+                        
+                        print(f"    [SCENARIO-03] {copay_base}/{coins_base}: HDHP is true -> Set modifiers to 'After Deductible' and preserved limitation values if any")
+                        continue
+                    # ==========================================
+
                     # WARNING SCENARIO-03: SBC Warning + Deductible Question Answer = "No."
                     # Trigger: SBC warning present AND answer to "Are there services covered before you meet your deductible?" is "No."
                     # Logic: For any applicable Medical field with copay value and no deductible exception wording:
@@ -1544,15 +1569,6 @@ class RulesEngine:
                         section[copay_status_key] = "Deductible applies"
                         section[coins_status_key] = "Deductible applies"
                         print(f"    [SCENARIO-02] {trigger_source} contains 'Deductible applies' -> {copay_base}/{coins_base} set to 'After Deductible'")
-                        continue
-
-                    # SCENARIO-03: HDHP Check
-                    if hdhp:
-                        section[copay_mod_key] = "After Deductible"
-                        section[coins_mod_key] = "After Deductible"
-                        section[copay_status_key] = ""
-                        section[coins_status_key] = ""
-                        print(f"    [SCENARIO-03] {copay_base}/{coins_base}: HDHP is true -> Set modifiers to 'After Deductible' and blanked Col H")
                         continue
 
                     # SCENARIO-00: Fallback Default

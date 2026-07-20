@@ -8,6 +8,7 @@ import {
   Download,
   FileSpreadsheet,
   FileText,
+  GitMerge,
   Image as ImageIcon,
   Loader2,
   Moon,
@@ -21,7 +22,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn, downloadJSON } from "@/lib/utils";
-import { getDownloadUrl, uploadFile, getStatus } from "@/lib/api/extraction";
+import { getDownloadUrl, mergeJSON, uploadFile, getStatus } from "@/lib/api/extraction";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -100,6 +101,8 @@ function Index() {
   const [processing, setProcessing] = useState(false);
   const [activeStage, setActiveStage] = useState(-1);
   const [results, setResults] = useState<ExtractionResult[]>([]);
+  const [isMerging, setIsMerging] = useState(false);
+  const [mergeError, setMergeError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const addFiles = useCallback((list: FileList | File[]) => {
@@ -268,6 +271,24 @@ function Index() {
 
   const batchDone = results.length > 0 && !processing && results.some(r => r.status === "success");
 
+  const handleMergeJSON = async () => {
+    const successfulTaskIds = results
+      .filter((r) => r.status === "success" && r.taskId)
+      .map((r) => r.taskId);
+
+    if (!successfulTaskIds.length) return;
+
+    setIsMerging(true);
+    setMergeError(null);
+    try {
+      await mergeJSON(successfulTaskIds);
+    } catch (e: any) {
+      setMergeError(e.message || "Failed to merge JSON files.");
+    } finally {
+      setIsMerging(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-background text-foreground">
       <Header />
@@ -389,7 +410,28 @@ function Index() {
                 title="Extraction Results"
                 subtitle="Structured plan data ready for export."
                 icon={<FileSpreadsheet className="h-4 w-4" />}
-                action={<div className="flex items-center gap-2"><span className="text-sm text-muted-foreground">Completed: {results.filter((r) => r.status === "success").length}</span></div>}
+                action={
+                  <div className="flex items-center gap-3">
+                    <span className="text-sm text-muted-foreground">
+                      Completed: {results.filter((r) => r.status === "success").length}
+                    </span>
+                    <Button
+                      id="merge-json-btn"
+                      size="sm"
+                      variant="outline"
+                      onClick={handleMergeJSON}
+                      disabled={!batchDone || isMerging}
+                      className="h-8 gap-1.5 border-border bg-card text-foreground hover:bg-accent disabled:opacity-40"
+                      title="Merge all processed JSONs into a single file"
+                    >
+                      {isMerging ? (
+                        <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Merging…</>
+                      ) : (
+                        <><GitMerge className="h-3.5 w-3.5" /> Merge JSON</>
+                      )}
+                    </Button>
+                  </div>
+                }
               />
               <div className="p-0">
                 {results.length === 0 ? (
@@ -484,6 +526,13 @@ function Index() {
                         ))}
                       </tbody>
                     </table>
+                  </div>
+                )}
+                {mergeError && (
+                  <div className="border-t border-destructive/30 bg-destructive/5 px-6 py-3">
+                    <p className="text-xs font-medium text-destructive">
+                      ⚠ Merge failed: {mergeError}
+                    </p>
                   </div>
                 )}
               </div>

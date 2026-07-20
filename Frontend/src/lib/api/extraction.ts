@@ -43,3 +43,33 @@ export async function getStatus(taskId: string): Promise<ExtractionStatusRespons
 export function getDownloadUrl(taskId: string): string {
   return `${API_BASE_URL}/api/download/${taskId}`;
 }
+
+export async function mergeJSON(taskIds: string[]): Promise<void> {
+  const url = `${API_BASE_URL}/api/merge-json`;
+  console.log("[MERGE-JSON] Sending merge request for task IDs:", taskIds);
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_ids: taskIds }),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    const errorMsg = errorData.detail || `Merge failed: ${response.statusText}`;
+    console.error("[MERGE-JSON] Error:", errorMsg);
+    throw new Error(errorMsg);
+  }
+
+  // Stream the file blob and trigger download
+  const blob = await response.blob();
+  const downloadUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = downloadUrl;
+  link.download = "merged_output.json";
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(downloadUrl);
+  console.log("[MERGE-JSON] Download triggered successfully.");
+}
