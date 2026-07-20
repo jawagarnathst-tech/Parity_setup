@@ -193,7 +193,7 @@ async def merge_json(request: MergeJsonRequest):
     if not request.task_ids:
         raise HTTPException(status_code=400, detail="No task IDs provided.")
 
-    merged: list[dict] = []
+    merged_output: dict = {"Plan_Information_List": []}
 
     for task_id in request.task_ids:
         if task_id not in TASKS:
@@ -218,16 +218,13 @@ async def merge_json(request: MergeJsonRequest):
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            merged.append({
-                "filename": task["fileName"],
-                "data": data,
-            })
+            merged_output["Plan_Information_List"].append(data)
             logger.info(f"[merge-json] Included task {task_id} ({task['fileName']})")
         except Exception as e:
             logger.error(f"[merge-json] Failed to read JSON for task {task_id}: {e}")
             continue
 
-    if not merged:
+    if not merged_output["Plan_Information_List"]:
         raise HTTPException(
             status_code=400,
             detail="No valid processed JSON files found for the provided task IDs."
@@ -237,7 +234,7 @@ async def merge_json(request: MergeJsonRequest):
     tmp_path = OUTPUT_DIR / "merged_output.json"
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(merged, f, indent=2)
+            json.dump(merged_output, f, indent=2)
     except Exception as e:
         logger.error(f"[merge-json] Failed to write merged JSON: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create merged JSON: {str(e)}")
