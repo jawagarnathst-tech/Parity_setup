@@ -12,6 +12,10 @@ import os
 import uuid
 import logging
 from pathlib import Path
+BASE_DIR = Path(__file__).parent.resolve()
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
 from dotenv import load_dotenv
 
 from src.extractors.universal_extractor import UniversalExtractor
@@ -47,6 +51,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+@app.get("/health")
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint"""
@@ -58,12 +63,14 @@ async def health_check():
     }
 
 
+@app.get("/jobs")
 @app.get("/api/jobs")
 async def list_jobs():
     """Return a list of current extraction jobs."""
     return [{"task_id": tid, **info} for tid, info in TASKS.items()]
 
 
+@app.post("/extract")
 @app.post("/api/extract")
 async def extract_file(file: UploadFile = File(...)):
     """
@@ -135,6 +142,7 @@ async def extract_file(file: UploadFile = File(...)):
     }
 
 
+@app.get("/extract/{task_id}")
 @app.get("/api/extract/{task_id}")
 async def get_extraction_status(task_id: str):
     """
@@ -154,27 +162,57 @@ async def get_extraction_status(task_id: str):
     }
 
 
+@app.get("/download/{task_id}")
 @app.get("/api/download/{task_id}")
 async def download_excel(task_id: str):
     """
-    Download the generated Excel file
+    Download the generated Excel file (supports active tasks & disk fallback after server restart)
     """
-    if task_id not in TASKS:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    task = TASKS.get(task_id)
+    filename = task["fileName"] if task else f"SBC_{task_id}"
 
-    task = TASKS[task_id]
-    if task["status"] != "completed":
-        raise HTTPException(status_code=400, detail="Extraction not completed yet")
+    if task and task.get("results", {}).get("excelPath"):
+        excel_path = Path(task["results"]["excelPath"])
+    else:
+        excel_path = OUTPUT_DIR / "05_final_excel" / f"{task_id}.xlsx"
 
-    excel_path = task["results"].get("excelPath")
-    if not excel_path or not Path(excel_path).exists():
-        raise HTTPException(status_code=404, detail="Excel file not found")
+    if not excel_path.exists():
+        raise HTTPException(status_code=404, detail=f"Excel file for task {task_id} not found")
 
     return FileResponse(
         path=excel_path,
-        filename=f"{task['fileName']}_extraction.xlsx",
+        filename=f"{filename}_extraction.xlsx" if not filename.endswith(".xlsx") else filename,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+
+@app.get("/download-json/{task_id}")
+@app.get("/api/download-json/{task_id}")
+async def download_json(task_id: str):
+    """
+    Download the generated JSON file for a task (supports active tasks & disk fallback after server restart)
+    """
+    task = TASKS.get(task_id)
+    filename = task["fileName"] if task else f"SBC_{task_id}"
+
+    if task and task.get("results", {}).get("jsonPath"):
+        json_path = Path(task["results"]["jsonPath"])
+    else:
+        json_path = OUTPUT_DIR / "03_parsed_json" / f"{task_id}.json"
+
+    if json_path.exists():
+        return FileResponse(
+            path=json_path,
+            filename=f"{filename}_extraction.json" if not filename.endswith(".json") else filename,
+            media_type="application/json"
+        )
+
+    if task and task.get("results"):
+        plan_data = task["results"].get("planData") or task["results"]
+        if plan_data:
+            return JSONResponse(content=plan_data)
+
+    raise HTTPException(status_code=404, detail=f"JSON output for task {task_id} not found")
 
 
 async def run_extraction(task_id: str, file_path: Path, filename: str):
@@ -246,6 +284,13 @@ async def run_extraction(task_id: str, file_path: Path, filename: str):
         print(f"   ► Carrier: {carrier}")
         print(f"   ► Plan:    {plan_name}")
         print(f"   ► Score:   {confidence}%\n")
+
+        try:
+            from database import poc_db
+            poc_db.log_parity_run(task_id, filename, "SUCCESS", f"Carrier: {carrier}, Score: {confidence}%")
+            print(f"[DB] Logged Parity Setup run for {filename} to converter.db", flush=True)
+        except Exception as db_err:
+            print(f"[WARN] Failed to log Parity Setup run to DB: {db_err}", flush=True)
 
         return {
             "carrier": carrier,
