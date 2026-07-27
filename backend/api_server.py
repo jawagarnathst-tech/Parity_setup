@@ -187,6 +187,75 @@ async def download_excel(task_id: str):
     )
 
 
+class MergeJsonRequest(BaseModel):
+    task_ids: list[str]
+
+
+@app.post("/api/merge-json")
+async def merge_json(request: MergeJsonRequest):
+    """
+    Merge the JSON outputs from multiple processed tasks into a single downloadable JSON file.
+
+    Expects a JSON body: { "task_ids": ["<task_id_1>", "<task_id_2>", ...] }
+    Returns a merged JSON array: [{ "filename": "...", "data": { ... } }, ...]
+    """
+    if not request.task_ids:
+        raise HTTPException(status_code=400, detail="No task IDs provided.")
+
+    merged_output: dict = {"Plan_Information_List": []}
+
+    for task_id in request.task_ids:
+        if task_id not in TASKS:
+            logger.warning(f"[merge-json] Task ID not found: {task_id}")
+            continue
+
+        task = TASKS[task_id]
+        if task.get("status") != "completed":
+            logger.warning(f"[merge-json] Task not completed, skipping: {task_id}")
+            continue
+
+        json_path_str = task.get("results", {}).get("jsonPath")
+        if not json_path_str:
+            logger.warning(f"[merge-json] No jsonPath stored for task: {task_id}")
+            continue
+
+        json_path = Path(json_path_str)
+        if not json_path.exists():
+            logger.warning(f"[merge-json] JSON file does not exist: {json_path}")
+            continue
+
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            merged_output["Plan_Information_List"].append(data)
+            logger.info(f"[merge-json] Included task {task_id} ({task['fileName']})")
+        except Exception as e:
+            logger.error(f"[merge-json] Failed to read JSON for task {task_id}: {e}")
+            continue
+
+    if not merged_output["Plan_Information_List"]:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid processed JSON files found for the provided task IDs."
+        )
+
+    # Write merged JSON to a temp file and return as a downloadable response
+    tmp_path = OUTPUT_DIR / "merged_output.json"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(merged_output, f, indent=2)
+    except Exception as e:
+        logger.error(f"[merge-json] Failed to write merged JSON: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create merged JSON: {str(e)}")
+
+    return FileResponse(
+        path=str(tmp_path),
+        filename="merged_output.json",
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=merged_output.json"},
+    )
+
+
 async def run_extraction(task_id: str, file_path: Path, filename: str):
     """
     Run the extraction pipeline
