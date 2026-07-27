@@ -5,6 +5,7 @@ Exposes the extraction pipeline as a REST API for the frontend
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
 from fastapi import FastAPI, File, UploadFile, HTTPException
+from pydantic import BaseModel
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import json
@@ -184,35 +185,6 @@ async def download_excel(task_id: str):
         filename=f"{filename}_extraction.xlsx" if not filename.endswith(".xlsx") else filename,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
-
-@app.get("/download-json/{task_id}")
-@app.get("/api/download-json/{task_id}")
-async def download_json(task_id: str):
-    """
-    Download the generated JSON file for a task (supports active tasks & disk fallback after server restart)
-    """
-    task = TASKS.get(task_id)
-    filename = task["fileName"] if task else f"SBC_{task_id}"
-
-    if task and task.get("results", {}).get("jsonPath"):
-        json_path = Path(task["results"]["jsonPath"])
-    else:
-        json_path = OUTPUT_DIR / "03_parsed_json" / f"{task_id}.json"
-
-    if json_path.exists():
-        return FileResponse(
-            path=json_path,
-            filename=f"{filename}_extraction.json" if not filename.endswith(".json") else filename,
-            media_type="application/json"
-        )
-
-    if task and task.get("results"):
-        plan_data = task["results"].get("planData") or task["results"]
-        if plan_data:
-            return JSONResponse(content=plan_data)
-
-    raise HTTPException(status_code=404, detail=f"JSON output for task {task_id} not found")
 
 
 async def run_extraction(task_id: str, file_path: Path, filename: str):
