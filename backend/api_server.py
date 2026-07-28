@@ -4,9 +4,10 @@ Exposes the extraction pipeline as a REST API for the frontend
 """
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request
+from fastapi.openapi.docs import get_swagger_ui_html
 from pydantic import BaseModel
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import os
@@ -18,10 +19,79 @@ from dotenv import load_dotenv
 from src.extractors.universal_extractor import UniversalExtractor
 from src.validation.rules_engine import RulesEngine
 from src.output.excel_writer import ExcelWriter
+from src.schemas.api_schemas import (
+    HealthResponse,
+    JobStatus,
+    ExtractionResponse,
+    MergeJsonRequest,
+    BatchExtractionResponse,
+    ErrorResponse
+)
 
 load_dotenv()
 
-app = FastAPI(title="SBC Intellect API", version="1.0.0")
+app = FastAPI(title="SBC Intellect API", version="1.0.0", docs_url=None)
+
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui_html():
+    response = get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=app.title + " - Swagger UI",
+        oauth2_redirect_url=app.swagger_ui_oauth2_redirect_url,
+        swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
+        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
+    )
+    custom_js = """
+    <script>
+    window.addEventListener('load', function() {
+        const observer = new MutationObserver(function(mutations) {
+            const responseBodies = document.querySelectorAll('.response-col_description .language-json');
+            responseBodies.forEach(function(block) {
+                const parent = block.closest('.response-col_description');
+                if (!parent) return;
+                try {
+                    const data = JSON.parse(block.innerText);
+                    if (data.excelDownloadUrl && data.jsonDownloadUrl) {
+                        // Check if buttons already exist for THIS specific extraction
+                        let existingContainer = parent.querySelector('.custom-download-buttons');
+                        if (existingContainer) {
+                            // If they exist but point to the WRONG file (stale upload), remove them.
+                            // If they point to the correct file, do nothing to prevent infinite loops.
+                            if (existingContainer.innerHTML.includes(data.excelDownloadUrl)) {
+                                return;
+                            } else {
+                                existingContainer.remove();
+                            }
+                        }
+                        
+                        const btnContainer = document.createElement('div');
+                        btnContainer.className = 'custom-download-buttons';
+                        btnContainer.style = 'margin-top: 15px; display: flex; gap: 10px; background: #11171a; padding: 10px 15px; border-radius: 8px;';
+                        
+                        const btnExcel = document.createElement('a');
+                        btnExcel.href = data.excelDownloadUrl;
+                        btnExcel.innerText = '⚡ Download Excel';
+                        btnExcel.style = 'background: #0b2214; color: #4ade80; border: 1px solid #14532d; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-weight: bold; font-family: sans-serif; cursor: pointer; display: inline-flex; align-items: center; justify-content: center;';
+                        
+                        const btnJson = document.createElement('a');
+                        btnJson.href = data.jsonDownloadUrl;
+                        btnJson.innerText = '📁 Download JSON';
+                        btnJson.style = 'background: #0f172a; color: #60a5fa; border: 1px solid #1e3a8a; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-weight: bold; font-family: sans-serif; cursor: pointer; display: inline-flex; align-items: center; justify-content: center;';
+                        
+                        btnContainer.appendChild(btnExcel);
+                        btnContainer.appendChild(btnJson);
+                        parent.appendChild(btnContainer);
+                    }
+                } catch (e) {}
+            });
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+    });
+    </script>
+    """
+    html_content = response.body.decode("utf-8")
+    html_content = html_content.replace("</body>", custom_js + "</body>")
+    return HTMLResponse(html_content)
 
 # Configure CORS to allow frontend requests from any origin
 app.add_middleware(
@@ -48,7 +118,13 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-@app.get("/api/health")
+@app.get(
+    "/api/health",
+    response_model=HealthResponse,
+    tags=["System"],
+    summary="Check API Health",
+    description="Returns the current status and version of the API server."
+)
 async def health_check():
     """Health check endpoint"""
     logger.info("Health check requested")
@@ -59,14 +135,30 @@ async def health_check():
     }
 
 
-@app.get("/api/jobs")
+@app.get(
+    "/api/jobs",
+    response_model=list[JobStatus],
+    tags=["Jobs"],
+    summary="List All Jobs",
+    description="Returns a list of all current and past extraction jobs, including their status and progress."
+)
 async def list_jobs():
     """Return a list of current extraction jobs."""
     return [{"task_id": tid, **info} for tid, info in TASKS.items()]
 
 
-@app.post("/api/extract")
-async def extract_file(file: UploadFile = File(...)):
+@app.post(
+    "/api/extract",
+    response_model=ExtractionResponse,
+    tags=["Extraction"],
+    summary="Extract Single File",
+    description="Upload an SBC document (PDF, DOCX, or Image). The system will extract the text, run AI parsing, validate rules, and save JSON and Excel outputs.",
+    responses={
+        400: {"model": ErrorResponse, "description": "Bad Request (e.g., unsupported file type)"},
+        500: {"model": ErrorResponse, "description": "Internal Server Error during extraction"}
+    }
+)
+async def extract_file(request: Request, file: UploadFile = File(...)):
     """
     Upload SBC document (PDF, DOCX, image) and start extraction
     """
@@ -128,15 +220,30 @@ async def extract_file(file: UploadFile = File(...)):
         TASKS[task_id]["error"] = str(e)
         raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
 
+    base_url = str(request.base_url).rstrip("/")
+    excel_url = f"{base_url}/api/download/{task_id}"
+    json_url = f"{base_url}/api/download-json/{task_id}"
+
     return {
         "task_id": task_id,
         "fileName": file.filename,
         "status": "completed",
-        "message": "Extraction completed successfully"
+        "message": "Extraction completed successfully",
+        "excelDownloadUrl": excel_url,
+        "jsonDownloadUrl": json_url
     }
 
 
-@app.get("/api/extract/{task_id}")
+@app.get(
+    "/api/extract/{task_id}",
+    response_model=JobStatus,
+    tags=["Extraction"],
+    summary="Get Extraction Status",
+    description="Fetch the real-time status, progress, and results (JSON/Excel paths) of a specific extraction task.",
+    responses={
+        404: {"model": ErrorResponse, "description": "Task not found"}
+    }
+)
 async def get_extraction_status(task_id: str):
     """
     Get extraction status and results
@@ -150,12 +257,23 @@ async def get_extraction_status(task_id: str):
         "fileName": task["fileName"],
         "status": task["status"],
         "progress": task["progress"],
+        "uploadPath": task.get("uploadPath", ""),
         "results": task["results"],
         "error": task["error"],
     }
 
 
-@app.get("/api/download/{task_id}")
+@app.get(
+    "/api/download/{task_id}",
+    tags=["Downloads"],
+    summary="Download Excel File",
+    description="Download the final generated Excel file for a completed extraction task.",
+    responses={
+        200: {"description": "Excel File Download"},
+        400: {"model": ErrorResponse, "description": "Extraction not completed yet"},
+        404: {"model": ErrorResponse, "description": "Task or Excel file not found"}
+    }
+)
 async def download_excel(task_id: str):
     """
     Download the generated Excel file
@@ -178,11 +296,50 @@ async def download_excel(task_id: str):
     )
 
 
-class MergeJsonRequest(BaseModel):
-    task_ids: list[str]
+@app.get(
+    "/api/download-json/{task_id}",
+    tags=["Downloads"],
+    summary="Download Single JSON File",
+    description="Download the final generated JSON file for a completed extraction task.",
+    responses={
+        200: {"description": "JSON File Download"},
+        400: {"model": ErrorResponse, "description": "Extraction not completed yet"},
+        404: {"model": ErrorResponse, "description": "Task or JSON file not found"}
+    }
+)
+async def download_json(task_id: str):
+    """
+    Download the generated JSON file
+    """
+    if task_id not in TASKS:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+    task = TASKS[task_id]
+    if task["status"] != "completed":
+        raise HTTPException(status_code=400, detail="Extraction not completed yet")
+
+    json_path = task["results"].get("jsonPath")
+    if not json_path or not Path(json_path).exists():
+        raise HTTPException(status_code=404, detail="JSON file not found")
+
+    return FileResponse(
+        path=json_path,
+        filename=f"{task['fileName']}_extraction.json",
+        media_type="application/json"
+    )
 
 
-@app.post("/api/merge-json")
+@app.post(
+    "/api/merge-json",
+    tags=["Downloads"],
+    summary="Merge and Download JSON",
+    description="Merge the JSON outputs from multiple processed tasks into a single downloadable JSON file.",
+    responses={
+        200: {"description": "Merged JSON File Download"},
+        400: {"model": ErrorResponse, "description": "No task IDs provided or no valid processed JSON files found"},
+        500: {"model": ErrorResponse, "description": "Failed to create merged JSON"}
+    }
+)
 async def merge_json(request: MergeJsonRequest):
     """
     Merge the JSON outputs from multiple processed tasks into a single downloadable JSON file.
@@ -351,7 +508,16 @@ async def run_extraction(task_id: str, file_path: Path, filename: str):
             raise
 
 
-@app.post("/api/batch")
+@app.post(
+    "/api/batch",
+    response_model=BatchExtractionResponse,
+    tags=["Extraction"],
+    summary="Batch Extract Multiple Files",
+    description="Upload multiple SBC documents simultaneously to process them in a batch.",
+    responses={
+        400: {"model": ErrorResponse, "description": "No files provided"}
+    }
+)
 async def batch_extract(files: list[UploadFile] = File(...)):
     """
     Batch extract multiple files
@@ -434,6 +600,7 @@ if __name__ == "__main__":
 
     local_ip = get_local_ip()
     print(f"Starting SBC Intellect API Server on http://{local_ip}:{available_port} (also http://localhost:{available_port})")
+    print(f"📄 Swagger Documentation available at: http://{local_ip}:{available_port}/docs")
 
     frontend_env_path = BACKEND_DIR.parent / "Frontend" / ".env"
     try:

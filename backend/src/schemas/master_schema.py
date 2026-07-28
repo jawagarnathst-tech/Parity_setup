@@ -38,6 +38,7 @@ class OfficeVisits(BaseModel):
 
 class HospitalSurgical(BaseModel):
     inpatient_copay: Optional[str] = Field(description="Copay amount")
+    inpatient_copay_is_per_day: Optional[bool] = Field(default=False, description="Whether inpatient copay was calculated from per-day charge")
     inpatient_copay_modifier: Optional[str] = Field(default=None)
     inpatient_copay_deductible_status: Optional[str] = Field(default=None)
     inpatient_coinsurance: Optional[str] = Field(default=None)

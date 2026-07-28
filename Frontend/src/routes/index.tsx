@@ -585,8 +585,10 @@ function Header() {
 
         <div className="flex items-center gap-3">
           <ThemeToggle />
-          <Button variant="outline" className="rounded-lg border-border bg-card hover:bg-accent">
-            <FileText className="mr-2 h-4 w-4" /> Docs
+          <Button variant="outline" className="rounded-lg border-border bg-card hover:bg-accent" asChild>
+            <a href={`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'}/docs`} target="_blank" rel="noreferrer">
+              <FileText className="mr-2 h-4 w-4" /> API Swagger
+            </a>
           </Button>
         </div>
       </div>
