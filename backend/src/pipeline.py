@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from src.extractors.universal_extractor import UniversalExtractor
 from src.validation.rules_engine import RulesEngine
 from src.output.excel_writer import ExcelWriter
+from src.output.json_formatter import wrap_plans
 from src.output.report_generator import ReportGenerator
 
 def run_pipeline():
@@ -58,10 +59,11 @@ def run_pipeline():
             schema_model = extractor.extract_text(file_path, save_raw_path=raw_text_path, filename=filename)
             schema_dict = schema_model.model_dump()
             validated_dict, report = rules.validate_and_score(schema_dict, base_name)
+            json_output = wrap_plans([validated_dict])
             
             json_path = os.path.join(output_dir, "03_parsed_json", f"{base_name}.json")
             with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(validated_dict, f, indent=2)
+                json.dump(json_output, f, indent=2)
                 
             reporter.generate(report, os.path.join(output_dir, "04_reports", f"{base_name}_report.json"))
             all_data.append(validated_dict)

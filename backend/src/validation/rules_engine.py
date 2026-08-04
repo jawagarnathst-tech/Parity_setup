@@ -1,3 +1,74 @@
+import re
+
+_NON_HOSPITAL_FACILITY_RE = re.compile(
+    r'ambulatory\s+surgery|(?:\basc\b)|free[- ]standing',
+    re.IGNORECASE,
+)
+_HOSPITAL_FACILITY_RE = re.compile(
+    r'\bhospital(?:\s+room)?\b',
+    re.IGNORECASE,
+)
+
+
+def _hospital_priority_segment(text: str) -> str | None:
+    """When a cell lists ASC/office and Hospital costs, return the Hospital slice only."""
+    if not text:
+        return None
+    if not _HOSPITAL_FACILITY_RE.search(text):
+        return None
+    if not _NON_HOSPITAL_FACILITY_RE.search(text):
+        return None
+
+    for chunk in re.split(r'\s*[/|;]\s*|\s+\band\s+', text, flags=re.IGNORECASE):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if _HOSPITAL_FACILITY_RE.search(chunk) and not _NON_HOSPITAL_FACILITY_RE.search(chunk):
+            return chunk
+
+    hosp_match = re.search(
+        r'(hospital(?:\s+room)?[^$%]*(?:[\$\d][^/|;]*))',
+        text,
+        re.IGNORECASE,
+    )
+    if hosp_match:
+        return hosp_match.group(1).strip()
+    return None
+
+
+def _extract_dollar_from_cell(text, hospital_priority: bool = False):
+    if not text:
+        return None
+    if hospital_priority:
+        segment = _hospital_priority_segment(text)
+        if segment:
+            text = segment
+    if re.search(r'no charge|not applicable', text, re.IGNORECASE):
+        return '$0'
+    dollar_match = re.search(r'\$\s*([\d,]+(?:\.\d+)?)', text)
+    if not dollar_match:
+        return None
+    amount = dollar_match.group(1).replace(',', '')
+    if '.' in amount:
+        whole, frac = amount.split('.', 1)
+        frac = frac.rstrip('0')
+        if not frac:
+            return f"${int(whole):,}"
+        return f"${int(whole):,}.{frac}"
+    return f"${int(amount):,}"
+
+
+def _extract_percent_from_cell(text, hospital_priority: bool = False):
+    if not text:
+        return None
+    if hospital_priority:
+        segment = _hospital_priority_segment(text)
+        if segment:
+            text = segment
+    percent_match = re.search(r'(\d+)\s*%', text)
+    return f"{percent_match.group(1)}%" if percent_match else None
+
+
 class RulesEngine:
     def validate_and_score(self, schema_data: dict, filename_fallback: str = None, raw_text_path: str = None) -> tuple[dict, dict]:
         import re  # Add regex import for validation
@@ -87,6 +158,11 @@ class RulesEngine:
                 if '. ' in recovered:
                     recovered = recovered.split('. ')[-1].strip()
                 recovered = recovered.lstrip(':.- ').strip()
+                # Strip coverage-for / plan-type metadata suffixes (e.g. "PLAN for: Employee/Family | Plan Type: EPO")
+                recovered = re.sub(r'coverage\s*for\s*:.*', '', recovered, flags=re.IGNORECASE)
+                recovered = re.sub(r'\s+for\s*:.*', '', recovered, flags=re.IGNORECASE)
+                recovered = re.sub(r'plan\s*type\s*:.*', '', recovered, flags=re.IGNORECASE)
+                recovered = recovered.strip(' |,-/\t:')
 
                 schema_data['plan_information']['plan_name'] = recovered
                 plan_name = recovered
@@ -300,6 +376,10 @@ class RulesEngine:
             """
             # STRATEGY 1: Look for explicit "In-Network" label (most reliable)
             for i, part in enumerate(parts):
+                # If it looks like a cost cell or is very long, it's probably data, not a header
+                if len(part) > 80 or re.search(r'\$\s*[\d,]+(?:\.\d+)?|\d+\s*%', part):
+                    continue
+                    
                 part_lower = part.lower().strip()
                 # Check if this column header explicitly says "In-Network"
                 if 'in-network' in part_lower or 'in network' in part_lower:
@@ -348,29 +428,6 @@ class RulesEngine:
             # WITHOUT Preferred Network: first cost column is In-Network
             return cost_indices[0]
 
-        def _extract_dollar_from_cell(text):
-            if not text:
-                return None
-            if re.search(r'no charge|not applicable', text, re.IGNORECASE):
-                return '$0'
-            dollar_match = re.search(r'\$\s*([\d,]+(?:\.\d+)?)', text)
-            if not dollar_match:
-                return None
-            amount = dollar_match.group(1).replace(',', '')
-            if '.' in amount:
-                whole, frac = amount.split('.', 1)
-                frac = frac.rstrip('0')
-                if not frac:
-                    return f"${int(whole):,}"
-                return f"${int(whole):,}.{frac}"
-            return f"${int(amount):,}"
-
-        def _extract_percent_from_cell(text):
-            if not text:
-                return None
-            percent_match = re.search(r'(\d+)\s*%', text)
-            return f"{percent_match.group(1)}%" if percent_match else None
-
         def _parse_in_network_costs_from_pipe_line(line, has_preferred):
             parts = [part.strip() for part in line.split('|')]
             idx = _in_network_cost_column_index(parts, has_preferred)
@@ -403,23 +460,30 @@ class RulesEngine:
                 # These services can have BOTH copay and coinsurance
                 'er_copay': ('hospital_surgical', 'er'),
                 'urgent_care_copay': ('urgent_care_labs_imaging', 'urgent_care'),
-                'lab_services_copay': ('urgent_care_labs_imaging', 'lab_services'),
-                'xray_copay': ('urgent_care_labs_imaging', 'xray'),
-                'medical_imaging_copay': ('urgent_care_labs_imaging', 'medical_imaging'),
+                # REMOVED lab_services_copay, xray_copay, medical_imaging_copay:
+                # UHC PDFs pack Lab AND X-Ray costs into ONE cell (e.g., "Hospital Lab: 50% ... Hospital X-Ray: 20%").
+                # The naive regex cannot untangle these — it grabs the first % it sees and wrongly applies it to BOTH.
+                # The LLM (GPT-4o) handles this correctly, so we trust its output and skip the override here.
             }
             fixes = 0
             for copay_base, (section_key, prefix) in service_section_map.items():
                 keywords = service_raw_keywords.get(copay_base, [])
                 if not keywords:
                     continue
+                # Use word-boundary regex for matching to prevent false hits.
+                # e.g. keyword 'lab' would match inside 'available', 'syllable' with plain `in`.
+                # re.search with \b ensures only the standalone word matches.
+                def _kw_match(line_lower, kw):
+                    return bool(re.search(r'\b' + re.escape(kw) + r'\b', line_lower))
+
                 candidates = [
                     line for line in raw_lines
-                    if '|' in line and any(kw in line.lower() for kw in keywords)
+                    if '|' in line and any(_kw_match(line.lower(), kw) for kw in keywords)
                 ]
                 best_result = None
                 best_rank = (-1, -1, -1, -1)
                 for line in candidates:
-                    score = sum(1 for kw in keywords if kw in line.lower())
+                    score = sum(1 for kw in keywords if _kw_match(line.lower(), kw))
                     parsed = _parse_in_network_costs_from_pipe_line(line, has_preferred)
                     if parsed is None or (parsed[0] is None and parsed[1] is None):
                         continue
@@ -595,25 +659,37 @@ class RulesEngine:
                             out_of_network_value = potential_oon
 
                 # Check copay rule: Hospital facility fees should NOT have copays extracted
+                # EXCEPTION: Do NOT remove copays that were calculated from per-day charges
                 if current_copay:
-                    # Check if this is actually from the facility fee row
-                    copay_in_in_network = _extract_dollar_from_cell(in_network_value) if in_network_value else None
+                    # Check if this copay was marked as "per-day" in extraction phase
+                    is_per_day_copay = section.get(f'{service_name}_copay_is_per_day', False)
+                    
+                    if is_per_day_copay:
+                        # Per-day copay is LOCKED - don't attempt to validate against table rows
+                        print(f"    [HOSPITAL-FACILITY] {section_key}.{copay_key}: Skipping validation (per-day copay is locked: '{current_copay}')")
+                    else:
+                        # Check if this is actually from the facility fee row
+                        copay_in_in_network = _extract_dollar_from_cell(
+                            in_network_value, hospital_priority=True
+                        ) if in_network_value else None
 
-                    # If we extracted a copay but it's not in the In-Network Facility Fee row, remove it
-                    if copay_in_in_network is None and current_copay:
-                        section[copay_key] = None
-                        fixes += 1
-                        print(f"    [FIX-HOSPITAL-FACILITY] {section_key}.{copay_key}: Removed '{current_copay}' (not from Facility Fee In-Network row)")
-                    elif copay_in_in_network and copay_in_in_network != current_copay:
-                        # Copay found in In-Network row but value differs (LLM picked wrong row e.g. hospital-affiliated vs independent)
-                        # Correct it to the actual In-Network Facility Fee row value
-                        section[copay_key] = copay_in_in_network
-                        fixes += 1
-                        print(f"    [FIX-HOSPITAL-FACILITY] {section_key}.{copay_key}: Corrected '{current_copay}' -> '{copay_in_in_network}' (In-Network Facility Fee row)")
+                        # If we extracted a copay but it's not in the In-Network Facility Fee row, remove it
+                        if copay_in_in_network is None and current_copay:
+                            section[copay_key] = None
+                            fixes += 1
+                            print(f"    [FIX-HOSPITAL-FACILITY] {section_key}.{copay_key}: Removed '{current_copay}' (not from Facility Fee In-Network row)")
+                        elif copay_in_in_network and copay_in_in_network != current_copay:
+                            # Copay found in In-Network row but value differs (LLM picked wrong row e.g. hospital-affiliated vs independent)
+                            # Correct it to the actual In-Network Facility Fee row value
+                            section[copay_key] = copay_in_in_network
+                            fixes += 1
+                            print(f"    [FIX-HOSPITAL-FACILITY] {section_key}.{copay_key}: Corrected '{current_copay}' -> '{copay_in_in_network}' (In-Network Facility Fee row)")
 
                 # Rule: Hospital coinsurance should come from Facility Fee row's In-Network column ONLY
                 if current_coinsurance:
-                    coins_in_in_network = _extract_percent_from_cell(in_network_value) if in_network_value else None
+                    coins_in_in_network = _extract_percent_from_cell(
+                        in_network_value, hospital_priority=True
+                    ) if in_network_value else None
                     coins_in_oon = _extract_percent_from_cell(out_of_network_value) if out_of_network_value else None
 
                     # If extracted coinsurance doesn't match In-Network Facility Fee, but matches Out-of-Network, it's wrong
@@ -840,7 +916,8 @@ class RulesEngine:
             inpatient = schema_data.get('hospital_surgical', {})
             if isinstance(inpatient, dict):
                 current_copay = inpatient.get('inpatient_copay')
-                if current_copay and current_copay.startswith('$'):
+                is_already_multiplied = inpatient.get('inpatient_copay_is_per_day', False)
+                if current_copay and current_copay.startswith('$') and not is_already_multiplied:
                     # Search raw lines for inpatient rows to see if "$X per day" pattern is mentioned
                     has_per_day_copay = False
                     for line in raw_lines:
@@ -870,6 +947,7 @@ class RulesEngine:
                                     new_copay = f"${multiplied:,.2f}"
                                     
                                 inpatient['inpatient_copay'] = new_copay
+                                inpatient['inpatient_copay_is_per_day'] = True
                                 fixes += 1
                                 print(f"    [FIX-PER-DAY] hospital_surgical.inpatient_copay: Multiplied '{current_copay}' by 3 -> '{new_copay}' (found '$X per day' pattern)")
                         except Exception as e:
@@ -977,7 +1055,6 @@ class RulesEngine:
                 print(f"    [RESTORE] Applied {fixes} In-Network only correction(s)")
         
         _fix_cross_column_medical_extraction(schema_data, raw_text_lines)
-        _validate_hospital_facility_fee_only(schema_data, raw_text_lines)
         _restore_missing_in_network_copays(schema_data, raw_text_lines)
 
         scenario_04_active = False
@@ -1202,6 +1279,26 @@ class RulesEngine:
                 if len(parts) > 1:
                     return " ".join(parts[-2:])
             return None
+        
+        # ==========================================
+        # EMERGENCY ROOM COINSURANCE FIX
+        # ==========================================
+        # CRITICAL FIX: If ER coinsurance is 0% but raw text shows a percentage,
+        # correct it immediately. This handles cases where LLM misinterprets
+        # footnotes or where "No Charge" from emergency medical transportation
+        # bleeds into the ER visit row.
+        hospital_section = schema_data.get('hospital_surgical', {})
+        er_coins_value = hospital_section.get('er_coinsurance', '0%')
+        if er_coins_value == '0%':
+            # Search raw text for "Emergency room care" + percentage pattern
+            for line in raw_text_lines:
+                if 'emergency room care' in line.lower() or 'emergency room' in line.lower():
+                    pct_match = re.search(r'(\d+)%\s*coinsurance', line, re.IGNORECASE)
+                    if pct_match:
+                        correct_percent = pct_match.group(1)
+                        hospital_section['er_coinsurance'] = f"{correct_percent}%"
+                        print(f"    [ER-FIX] ER Coinsurance: Corrected 0% -> {correct_percent}% (from raw text)")
+                        break
         
         medical_sections = ['office_visits', 'hospital_surgical', 'urgent_care_labs_imaging']
         medical_services_map = [
@@ -1538,8 +1635,22 @@ class RulesEngine:
                         section[coins_mod_key] = "Deductible Waived"
                         
                         if has_no_charge:
+                            # CRITICAL: If coinsurance is already a non-zero percentage (e.g., 50%), 
+                            # do NOT override it with "No charge". This handles cases where "No Charge" 
+                            # appears in the section header but doesn't apply to coinsurance.
+                            # Example: Emergency Room has "No Charge" for medical transportation but "50% coinsurance" for ER visit itself.
+                            is_coins_non_zero = False
+                            if coins_value:
+                                val_str = str(coins_value).lower()
+                                pct_match = re.search(r'(\d+(?:\.\d+)?)%', val_str)
+                                if pct_match and float(pct_match.group(1)) > 0:
+                                    is_coins_non_zero = True
+                            
                             section[copay_status_key] = "No charge"
-                            section[coins_status_key] = "No charge"
+                            # Only set coinsurance status to "No charge" if it's actually 0% or empty
+                            if not is_coins_non_zero:
+                                section[coins_status_key] = "No charge"
+                            # else: Keep existing coinsurance status (don't override non-zero coinsurance with "No charge")
                         else:
                             section[copay_status_key] = "Deductible does not apply"
                             section[coins_status_key] = "Deductible does not apply"
@@ -1581,15 +1692,28 @@ class RulesEngine:
         # Phase 3.5: Lab-Xray Sync Rule
         # When lab_services and xray come from same "Diagnostic test (x-ray, blood work)" PDF row,
         # they should have matching copay AND coinsurance values. If lab is different, sync them.
+        # EXCEPTION: If the raw text has distinct "Hospital Lab" and "Hospital X-ray" values,
+        # do NOT sync — the LLM correctly extracted different values per the Hospital Priority rule.
         urgent_care_labs = schema_data.get('urgent_care_labs_imaging', {})
         if isinstance(urgent_care_labs, dict):
             lab_copay = urgent_care_labs.get('lab_services_copay')
             xray_copay = urgent_care_labs.get('xray_copay')
             lab_coin = urgent_care_labs.get('lab_services_coinsurance')
             xray_coin = urgent_care_labs.get('xray_coinsurance')
-            
-            # Sync copay if lab differs from xray
-            if lab_copay != xray_copay and xray_copay is not None:
+
+            # Check if raw text has explicit "Hospital Lab" and "Hospital X-ray" — if so, skip sync
+            has_hospital_lab = False
+            if raw_text_path:
+                try:
+                    with open(raw_text_path, 'r', encoding='utf-8') as _rf:
+                        _raw = _rf.read()
+                    if re.search(r'hospital\s+lab', _raw, re.IGNORECASE) and re.search(r'hospital\s+x-?ray', _raw, re.IGNORECASE):
+                        has_hospital_lab = True
+                except Exception:
+                    pass
+
+            # Sync copay if lab differs from xray (skip if Hospital Lab explicitly present in raw text)
+            if not has_hospital_lab and lab_copay != xray_copay and xray_copay is not None:
                 urgent_care_labs['lab_services_copay'] = xray_copay
                 xray_copay_mod = urgent_care_labs.get('xray_copay_modifier')
                 if xray_copay_mod:
@@ -1598,9 +1722,11 @@ class RulesEngine:
                 if xray_copay_status:
                     urgent_care_labs['lab_services_copay_deductible_status'] = xray_copay_status
                 print(f"    [FIX-LAB-XRAY-SYNC] lab_services_copay: Synced to xray_copay ('{xray_copay}')")
-            
-            # Sync coinsurance if lab is 0% but xray is higher
-            if lab_coin == '0%' and xray_coin and xray_coin != '0%':
+            elif has_hospital_lab and lab_copay != xray_copay:
+                print(f"    [FIX-LAB-XRAY-SYNC] Skipped sync — Hospital Lab/X-Ray values differ intentionally (Hospital Priority rule)")
+
+            # Sync coinsurance if lab is 0% but xray is higher (skip if Hospital Lab explicitly present)
+            if not has_hospital_lab and lab_coin == '0%' and xray_coin and xray_coin != '0%':
                 # Lab and xray are from same diagnostic test row - sync coinsurance and modifier
                 urgent_care_labs['lab_services_coinsurance'] = xray_coin
                 xray_mod = urgent_care_labs.get('xray_coinsurance_modifier')

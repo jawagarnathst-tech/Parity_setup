@@ -19,14 +19,18 @@ from dotenv import load_dotenv
 from src.extractors.universal_extractor import UniversalExtractor
 from src.validation.rules_engine import RulesEngine
 from src.output.excel_writer import ExcelWriter
+from src.output.json_formatter import wrap_plans, unwrap_plans
 from src.schemas.api_schemas import (
     HealthResponse,
     JobStatus,
     ExtractionResponse,
     MergeJsonRequest,
     BatchExtractionResponse,
-    ErrorResponse
+    ErrorResponse,
+    FolderAutomationRequest,
+    FolderAutomationResponse
 )
+import time
 
 load_dotenv()
 
@@ -375,7 +379,7 @@ async def merge_json(request: MergeJsonRequest):
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            merged_output["Plan_Information_List"].append(data)
+            merged_output["Plan_Information_List"].extend(unwrap_plans(data))
             logger.info(f"[merge-json] Included task {task_id} ({task['fileName']})")
         except Exception as e:
             logger.error(f"[merge-json] Failed to read JSON for task {task_id}: {e}")
@@ -431,6 +435,7 @@ async def run_extraction(task_id: str, file_path: Path, filename: str):
         rules = RulesEngine()
         validated_dict, report = rules.validate_and_score(schema_dict, base_name, raw_text_path=str(raw_text_path))
         confidence = report.get("confidence_score", 0)
+        json_output = wrap_plans([validated_dict])
 
         # Step 3: Save JSON
         print("  ⏳ [Step 3/5] Saving structured JSON...")
@@ -439,7 +444,7 @@ async def run_extraction(task_id: str, file_path: Path, filename: str):
         json_path = OUTPUT_DIR / "03_parsed_json" / f"{task_id}.json"
         json_path.parent.mkdir(parents=True, exist_ok=True)
         with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(validated_dict, f, indent=2)
+            json.dump(json_output, f, indent=2)
 
         # Step 4: Write Excel
         print("  ⏳ [Step 4/5] Generating final Excel mapping...")
@@ -482,7 +487,7 @@ async def run_extraction(task_id: str, file_path: Path, filename: str):
             "excelPath": str(excel_path),
             "jsonPath": str(json_path),
             "flags": report.get("flags", []),
-            "planData": validated_dict,
+            "planData": json_output,
         }
 
     except Exception as e:
@@ -558,6 +563,109 @@ async def batch_extract(files: list[UploadFile] = File(...)):
         "status": "completed",
         "results": results
     }
+
+
+@app.post(
+    "/api/automate/folder",
+    response_model=FolderAutomationResponse,
+    tags=["Automation"],
+    summary="Folder-Based Automation",
+    description="Process all supported PDFs from an input folder, merge the results, and save to an output folder.",
+    responses={
+        400: {"model": ErrorResponse, "description": "Invalid input/output folders"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    }
+)
+async def folder_automation(request: FolderAutomationRequest):
+    start_time = time.time()
+    input_dir = Path(request.input_folder)
+    output_dir = Path(request.output_folder) if request.output_folder else input_dir
+
+    if not input_dir.exists() or not input_dir.is_dir():
+        raise HTTPException(status_code=400, detail=f"Input folder does not exist or is not a directory: {request.input_folder}")
+
+    # Ensure output directory exists
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot create or access output folder: {e}")
+
+    allowed_extensions = {'.pdf', '.docx', '.doc', '.jpg', '.jpeg', '.png', '.bmp', '.tiff'}
+    
+    files_to_process = [
+        f for f in input_dir.iterdir() 
+        if f.is_file() and f.suffix.lower() in allowed_extensions
+    ]
+
+    total_files = len(files_to_process)
+    success_count = 0
+    failed_count = 0
+    total_plans = 0
+    failed_details = []
+    
+    merged_output: dict = {"Plan_Information_List": []}
+
+    for file_path in files_to_process:
+        try:
+            task_id = str(uuid.uuid4())
+            filename = file_path.name
+            
+            logger.info(f"[Automation] Processing {filename} ({task_id})")
+            
+            # Initialize task to prevent KeyError if some other code expects it
+            TASKS[task_id] = {
+                "fileName": filename,
+                "status": "processing",
+                "progress": 0,
+                "uploadPath": str(file_path),
+                "results": None,
+                "error": None,
+            }
+            
+            extraction_result = await run_extraction(task_id, file_path, filename)
+            
+            TASKS[task_id]["status"] = "completed"
+            TASKS[task_id]["progress"] = 100
+            TASKS[task_id]["results"] = extraction_result
+            
+            # The extraction_result["planData"] contains {"Plan_Information_List": [...]}
+            plan_data = extraction_result.get("planData", {})
+            plans = unwrap_plans(plan_data)
+            
+            merged_output["Plan_Information_List"].extend(plans)
+            
+            success_count += 1
+            total_plans += len(plans)
+            
+        except Exception as e:
+            logger.error(f"[Automation] Failed to process {file_path.name}: {e}")
+            if task_id in TASKS:
+                TASKS[task_id]["status"] = "failed"
+                TASKS[task_id]["error"] = str(e)
+            failed_count += 1
+            failed_details.append({"filename": file_path.name, "error": str(e)})
+
+    merged_json_path = output_dir / "merged_output.json"
+    
+    if total_files > 0:
+        try:
+            with open(merged_json_path, "w", encoding="utf-8") as f:
+                json.dump(merged_output, f, indent=2)
+        except Exception as e:
+            logger.error(f"[Automation] Failed to write merged JSON to output folder: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to write merged JSON: {e}")
+
+    processing_time = time.time() - start_time
+
+    return FolderAutomationResponse(
+        total_files_found=total_files,
+        successfully_processed=success_count,
+        failed_files=failed_count,
+        total_plans_extracted=total_plans,
+        total_processing_time_seconds=round(processing_time, 2),
+        merged_json_path=str(merged_json_path) if total_files > 0 else "",
+        failed_details=failed_details
+    )
 
 
 if __name__ == "__main__":

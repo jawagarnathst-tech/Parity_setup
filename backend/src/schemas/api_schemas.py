@@ -14,7 +14,7 @@ class ExtractionResult(BaseModel):
     excelPath: str = Field(..., description="Path to the generated Excel file on the server")
     jsonPath: str = Field(..., description="Path to the generated JSON file on the server")
     flags: List[str] = Field(default_factory=list, description="Any validation warnings or flags")
-    planData: Dict[str, Any] = Field(..., description="The raw validated JSON structure")
+    planData: Dict[str, Any] = Field(..., description="Validated JSON with Plan_Information_List array")
 
 class JobStatus(BaseModel):
     task_id: str = Field(..., description="Unique identifier for the extraction task")
@@ -50,3 +50,16 @@ class BatchExtractionResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     detail: str = Field(..., description="Detailed error message")
+
+class FolderAutomationRequest(BaseModel):
+    input_folder: str = Field(..., description="Absolute or relative path to the folder containing input PDFs")
+    output_folder: Optional[str] = Field(None, description="Optional. Path to save the merged JSON. If not provided, it saves in the input_folder")
+
+class FolderAutomationResponse(BaseModel):
+    total_files_found: int = Field(..., description="Total number of supported files found in the input folder")
+    successfully_processed: int = Field(..., description="Number of files successfully processed")
+    failed_files: int = Field(..., description="Number of files that failed processing")
+    total_plans_extracted: int = Field(..., description="Total number of plans extracted across all successful files")
+    total_processing_time_seconds: float = Field(..., description="Total processing time in seconds")
+    merged_json_path: str = Field(..., description="Path to the final merged JSON file in the output folder")
+    failed_details: List[Dict[str, str]] = Field(default_factory=list, description="List of failures with filename and error message")
