@@ -531,7 +531,7 @@ STRICT VALUE FORMATTING RULES - Follow these exactly:
 7. DO NOT include words like "copay", "coinsurance", "per visit", "per stay", "after deductible".
 8. COINSURANCE FIELDS: These expect a % value. Example: "20% coinsurance" -> "20%".
 9. COPAY FIELDS: These expect a $ value. Example: "$35 copay" -> "$35".
-10. DEDUCTIBLE AND OOP MAX FIELDS (individual_deductible, family_deductible, individual_oop_max, family_oop_max): Keep the $ symbol and comma. Example: "$1,500".
+10. DEDUCTIBLE AND OOP MAX FIELDS (individual_deductible, family_deductible, individual_oop_max, family_oop_max): Keep the $ symbol and comma. Example: "$1,500". SPECIAL RULE FOR OUT-OF-NETWORK OOP MAX ONLY: If the Out-of-Network Individual OOP Max or Family OOP Max field says "Unlimited" (or "unlimited"), return "$99,999" instead.
 11. 100% MINUS RULE (PATIENT RESPONSIBILITY): If the document lists what the PLAN pays for coinsurance (e.g., "Plan pays 80%", "Plan pays 70%"), or if any extracted coinsurance is between 60% and 100% (inclusive), you MUST subtract it from 100% to calculate the patient's responsibility. For example, if the document says "80%", extract it as "20%". If it says "70%", extract it as "30%". CRITICAL: The extracted coinsurance MUST be the PATIENT responsibility.
 
 CRITICAL: COPAY vs COINSURANCE DETECTION RULES:

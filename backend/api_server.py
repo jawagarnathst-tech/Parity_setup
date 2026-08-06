@@ -15,6 +15,7 @@ import uuid
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
+from typing import List
 
 from src.extractors.universal_extractor import UniversalExtractor
 from src.validation.rules_engine import RulesEngine
@@ -28,7 +29,8 @@ from src.schemas.api_schemas import (
     BatchExtractionResponse,
     ErrorResponse,
     FolderAutomationRequest,
-    FolderAutomationResponse
+    FolderAutomationResponse,
+    PowerAutomateBatchResponse
 )
 import time
 
@@ -666,6 +668,78 @@ async def folder_automation(request: FolderAutomationRequest):
         merged_json_path=str(merged_json_path) if total_files > 0 else "",
         failed_details=failed_details
     )
+
+
+@app.post(
+    "/api/v1/batch/process",
+    tags=["Automation"],
+    summary="Power Automate Batch Process",
+    description="Upload multiple PDFs directly and process them using the existing extraction engine.",
+)
+async def power_automate_batch_process(files: list[UploadFile] = File(...)):
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    # Create a temporary directory in UPLOAD_DIR
+    batch_id = str(uuid.uuid4())
+    temp_dir = UPLOAD_DIR / f"batch_{batch_id}"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    merged_output: dict = {
+        "status": "Success",
+        "Plan_Information_List": []
+    }
+
+    try:
+        for file in files:
+            file_name = file.filename
+            if not file_name:
+                continue
+                
+            upload_path = temp_dir / file_name
+            
+            # Save uploaded PDF
+            content = await file.read()
+            with open(upload_path, "wb") as f:
+                f.write(content)
+            
+            try:
+                task_id = str(uuid.uuid4())
+                
+                # Initialize task to prevent KeyError if some other code expects it
+                TASKS[task_id] = {
+                    "fileName": file_name,
+                    "status": "processing",
+                    "progress": 0,
+                    "uploadPath": str(upload_path),
+                    "results": None,
+                    "error": None,
+                }
+                
+                # Invoke existing batch processing logic
+                extraction_result = await run_extraction(task_id, upload_path, file_name)
+                
+                TASKS[task_id]["status"] = "completed"
+                TASKS[task_id]["progress"] = 100
+                TASKS[task_id]["results"] = extraction_result
+                
+                plan_data = extraction_result.get("planData", {})
+                plans = unwrap_plans(plan_data)
+                merged_output["Plan_Information_List"].extend(plans)
+                
+            except Exception as e:
+                logger.error(f"[Power Automate Batch] Failed to process {file_name}: {e}")
+                if task_id in TASKS:
+                    TASKS[task_id]["status"] = "failed"
+                    TASKS[task_id]["error"] = str(e)
+    finally:
+        # Delete temporary files and folder
+        try:
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception as cleanup_error:
+            logger.error(f"Failed to clean up temp directory {temp_dir}: {cleanup_error}")
+
+    return merged_output
 
 
 if __name__ == "__main__":
