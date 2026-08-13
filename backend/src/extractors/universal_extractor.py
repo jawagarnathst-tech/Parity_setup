@@ -531,7 +531,7 @@ STRICT VALUE FORMATTING RULES - Follow these exactly:
 7. DO NOT include words like "copay", "coinsurance", "per visit", "per stay", "after deductible".
 8. COINSURANCE FIELDS: These expect a % value. Example: "20% coinsurance" -> "20%".
 9. COPAY FIELDS: These expect a $ value. Example: "$35 copay" -> "$35".
-10. DEDUCTIBLE AND OOP MAX FIELDS (individual_deductible, family_deductible, individual_oop_max, family_oop_max): Keep the $ symbol and comma. Example: "$1,500". SPECIAL RULE FOR OUT-OF-NETWORK OOP MAX ONLY: If the Out-of-Network Individual OOP Max or Family OOP Max field says "Unlimited" (or "unlimited"), return "$99,999" instead.
+10. DEDUCTIBLE AND OOP MAX FIELDS (individual_deductible, family_deductible, individual_oop_max, family_oop_max): Keep the $ symbol and comma. Example: "$1,500". SPECIAL RULE FOR OUT-OF-NETWORK OOP MAX ONLY: If a specific dollar value is present, extract it, BUT if the value is greater than $99,999 (e.g., $100,000), you MUST cap it and return "$99,999". If the word "Unlimited" is EXPLICITLY present, return "$99,999". If Out-of-Network is not covered/applicable/mentioned, return "$0". DO NOT return "$99,999" unless the value exceeds $99,999 or "Unlimited" is explicitly written.
 11. 100% MINUS RULE (PATIENT RESPONSIBILITY): If the document lists what the PLAN pays for coinsurance (e.g., "Plan pays 80%", "Plan pays 70%"), or if any extracted coinsurance is between 60% and 100% (inclusive), you MUST subtract it from 100% to calculate the patient's responsibility. For example, if the document says "80%", extract it as "20%". If it says "70%", extract it as "30%". CRITICAL: The extracted coinsurance MUST be the PATIENT responsibility.
 
 CRITICAL: COPAY vs COINSURANCE DETECTION RULES:
@@ -555,6 +555,7 @@ MODIFIER FIELD RULES:
     - Otherwise, return null
 12. DEDUCTIBLE STATUS FIELDS (e.g., primary_care_copay_deductible_status, primary_care_coinsurance_deductible_status):
     - If the text explicitly says "deductible does not apply", "no charge", or "after deductible", extract that EXACT phrase into the deductible_status field. Otherwise return null.
+    - CRITICAL ANTI-BLEEDING RULE: Do NOT extract "deductible does not apply" for a service (like Lab Services) unless that exact phrase is physically located inside that specific service's row in the document. Do not copy it from adjacent rows like Primary Care or Preventive Care. If it is not explicitly stated in that specific row, return null.
 13. PHARMACY MODIFIER FIELDS (e.g., tier_1_copay_modifier, tier_2_coinsurance_modifier): 
     - If text says "deductible does not apply" for that tier → return "Rx - Deductible Waived"
     - If text mentions "rx deductible" or "prescription deductible" → return "Rx - After Rx Deductible"
@@ -568,14 +569,32 @@ HOSPITAL SURGICAL EXTRACTION RULES (FACILITY-ONLY):
 
 LAB AND X-RAY EXTRACTION RULES (SPLIT LAYOUT HANDLING):
 15a. LAB AND X-RAY COINSURANCE: When Lab and X-ray appear on SEPARATE LINES with percentages like "Lab: 20% coinsurance" and "X-ray: 20% coinsurance", extract BOTH values from their respective lines. Do NOT treat them as missing values just because they appear on different lines from the "Diagnostic test" label. Extract from the IN-NETWORK column ONLY (ignore "Not Covered" or Out-of-Network values that appear after a pipe |).
-    CRITICAL HOSPITAL PRIORITY FOR LAB AND X-RAY: If the document lists multiple Lab variants (e.g., "Office Lab", "Free Standing Lab", "Hospital Lab"), you MUST extract ONLY the "Hospital Lab" value. Completely ignore "Office Lab" and "Free Standing Lab" values. Similarly, if the document lists multiple X-Ray variants (e.g., "Free Standing X-ray", "Hospital X-ray"), you MUST extract ONLY the "Hospital X-ray" value. Completely ignore "Free Standing X-ray". If only a single Lab or X-Ray value exists with no facility qualifier, extract that single value as-is.
-    Examples: "Hospital Lab: $15 copay" → extract "$15" for lab_services_copay. "Hospital X-ray: $50 copay" → extract "$50" for xray_copay. "Lab: 20% coinsurance | Not Covered" (single value, no qualifier) → extract 20% for lab_services_coinsurance.
+    CRITICAL HOSPITAL/FACILITY PRIORITY FOR LAB AND X-RAY: Some documents use the word "Facility" instead of "Hospital" to indicate the same thing. These two terms are equivalent — treat "Lab Facility" the same as "Hospital Lab", and "Radiology Facility" the same as "Hospital X-ray". If the document lists multiple Lab sub-types (e.g., "Lab Office", "Lab Facility", "Free Standing Lab", "Hospital Lab"), you MUST extract ONLY the "Facility" or "Hospital" sub-type and completely ignore the "Office" and "Free Standing" sub-types. Similarly for X-Ray/Radiology: extract ONLY the "Radiology Facility" or "Hospital X-ray" sub-type and ignore "Radiology Office" and "Free Standing" variants. If only a single Lab or X-Ray value exists with no qualifier, extract that single value as-is.
+    CRITICAL - DEDUCTIBLE MODIFIER MUST COME FROM THE SAME SUB-ROW: When a cell contains multiple sub-rows (e.g., "Lab Office - $50 Deductible does not apply; Lab Facility - No charge; Radiology Office - $150 Deductible applies; Radiology Facility - $0 Deductible applies"), you MUST extract the cost AND its deductible phrase from the SAME sub-row. Do NOT mix phrases between sub-rows. Example: Lab = "Lab Facility - No charge" → cost=$0, deductible phrase="No charge" (treat as 'Deductible does not apply'). X-Ray = "Radiology Facility - $0/visit Deductible applies" → cost=$0, deductible phrase='Deductible applies'. Do NOT apply the Lab Facility's "No charge / Deductible does not apply" phrase to the X-Ray field.
+    Examples: "Lab Facility: No charge" → extract "$0" for lab_services_copay, deductible does NOT apply. "Radiology Facility: $0/visit Deductible applies" → extract "$0" for xray_copay, deductible DOES apply (After Deductible). "Hospital Lab: $15 copay" → extract "$15" for lab_services_copay. "Hospital X-ray: $50 copay" → extract "$50" for xray_copay.
 
-MEDICAL VALUE SELECTION (HOSPITAL PRIORITY):
-15b. CRITICAL FOR MULTIPLE FACILITY TYPES: For Inpatient, Outpatient, Lab, X-Ray, and Imaging benefits, if the document lists multiple costs based on the facility type (e.g., "Office" vs "Free-Standing" vs "Hospital", or "Ambulatory Surgery Center" vs "Hospital"), you MUST ALWAYS select and extract the "Hospital" value. Completely ignore the costs for Office, Free-Standing, or Ambulatory Surgery Centers. The source SBC may use different terminology like "Hospital Lab", "Hospital X-ray", "Hospital", etc. Always extract the Hospital cost for these specific benefits.
+MEDICAL VALUE SELECTION (HOSPITAL/FACILITY PRIORITY):
+15b. CRITICAL FOR MULTIPLE FACILITY TYPES: For Inpatient, Outpatient, Lab, X-Ray, and Imaging benefits, if the document lists multiple costs based on the facility type (e.g., "Office" vs "Free-Standing" vs "Hospital" vs "Facility"), you MUST ALWAYS select and extract the "Hospital" or "Facility" value. Completely ignore the costs for Office, Free-Standing, or Ambulatory Surgery Centers. The source SBC may use different terminology like "Hospital Lab", "Hospital X-ray", "Lab Facility", "Radiology Facility", "Hospital", "Facility", etc. Always extract the Hospital/Facility cost for these specific benefits. IMPORTANT: The deductible modifier ('Deductible applies' or 'Deductible does not apply') must also be taken from this same Hospital/Facility sub-row — never from the Office or Free-Standing sub-row.
 
 PHARMACY EXTRACTION RULES:
-16. PHARMACY TIER VALUES: Use the "STRUCTURED TABLES" provided in the text for accurate column alignment. You MUST extract ONLY the "In-Network Provider" (or "Participating Provider") value for Tiers 1-4. Do not extract Out-of-Network or Non-Participating values. CRITICAL FOR PREFERRED VS NON-PREFERRED RETAIL (tier_1 through tier_5 copay and coinsurance ONLY): If a pharmacy tier retail cell lists BOTH "Preferred" and "Non-preferred" costs, you MUST ALWAYS extract the Non-preferred value and completely ignore the Preferred value. Example: "Retail Preferred: $10 / Retail Non-preferred: $20" → extract "$20". Example: "Preferred: 20% / Non-preferred: 30%" → extract "30%". This rule does NOT apply to specialty_rx_description, tier_4_maximum, or tier_5_maximum (those fields keep both values per Rule 19). CRITICAL FOR BCBS / MULTI-NETWORK CELLS: If a single cell lists BOTH "Preferred Participating" and "Participating", you MUST extract the pure "Participating" value and IGNORE the "Preferred Participating" value. (e.g., if a cell says "Retail – Preferred Participating – $10 | Participating – $20", extract "$20"). CRITICAL FOR ANTHEM PLANS: If there is a "Level 1 Pharmacy" column, DO NOT extract from it; extract from the subsequent "In-Network Provider" column instead. If both retail and home delivery/mail order are present in a cell, extract ONLY the retail value.
+16. PHARMACY TIER VALUES: Use the "STRUCTURED TABLES" provided in the text for accurate column alignment. You MUST extract ONLY the "In-Network Provider" (or "Participating Provider") value for Tiers 1-5. Do not extract Out-of-Network or Non-Participating values. 
+
+⚠️ CRITICAL FOR PREFERRED VS NON-PREFERRED RETAIL (tier_1 through tier_5 copay and coinsurance ONLY): 
+If a pharmacy tier retail cell lists BOTH "Preferred" and "Non-preferred" costs, you MUST ALWAYS extract the LARGER/NON-PREFERRED value and COMPLETELY IGNORE the Preferred value. 
+
+EXAMPLES:
+- "Retail Preferred: $10 / Retail Non-preferred: $20" → extract "$20" (the NON-PREFERRED one)
+- "Preferred: 20% / Non-preferred: 30%" → extract "30%" (the NON-PREFERRED one)  
+- "Generic drugs (Preferred): No Charge, $10 / Generic drugs (Non-preferred): $10, $20" → extract "$20" for this tier (NON-PREFERRED value)
+- "Brand drugs (Preferred): $50, $70 / Brand drugs (Non-preferred): $100, $120" → extract "$120" for this tier (NON-PREFERRED value)
+
+⚠️ MANDATORY: When you see TWO values separated by commas in a cell (e.g., "$50, $70" or "No Charge, $10"), the SECOND value is NON-PREFERRED. Extract ONLY the second value.
+
+This rule does NOT apply to specialty_rx_description, tier_4_maximum, or tier_5_maximum (those fields keep both values per Rule 19). 
+
+CRITICAL FOR MULTI-NETWORK CELLS (ALL CARRIERS): If a single cell lists BOTH "Preferred Participating" and "Participating", you MUST extract the pure "Participating" value and IGNORE the "Preferred Participating" value. (e.g., if a cell says "Retail – Preferred Participating – $10 | Participating – $20", extract "$20"). 
+
+CRITICAL FOR ANTHEM PLANS: If there is a "Level 1 Pharmacy" column, DO NOT extract from it; extract from the subsequent "In-Network Provider" column instead. If both retail and home delivery/mail order are present in a cell, extract ONLY the retail value.
     
     CRITICAL FOR PIPE-SEPARATED PHARMACY TABLES (Anthem & similar plans):
     Some plans (e.g., Anthem) use pipe-separated tables with this exact structure:
@@ -590,7 +609,14 @@ PHARMACY EXTRACTION RULES:
     - Tier 1: "$20/prescription (retail only)" → extract "$20"
     - Tier 2: "$100/prescription (retail only)" → extract "$100" (NOT $90 retail or $225 home delivery from same tier)
     - Tier 3: "$170/prescription (retail only)" → extract "$170" (NOT $160 retail or $400 home delivery from same tier)
-    - Tier 4: "40% coinsurance up to $500/prescription" → extract "40%" in coinsurance field and "$500" in copay field
+    - Tier 4: "40% coinsurance up to $500/prescription" → extract "40%" in coinsurance field and "$500" in tier_4_maximum field (set copay to "$0")
+    
+    CRITICAL: These are EXAMPLES ONLY from specific plans. DO NOT use them as defaults if they do not appear in the file.
+    For ANY plan, extract ONLY the ACTUAL values you see in the document's In-Network column. 
+    - If Tier 4 shows "40% coinsurance up to $500" → extract "40%" and "$500"
+    - If Tier 4 shows "20% coinsurance up to $250" → extract "20%" and "$250"
+    - If Tier 4 shows something different → extract that instead
+    - If Tier 4 is NOT in the file → do NOT add these example values as defaults
 17. PHARMACY TIER COMPLETENESS: You MUST extract ALL pharmacy tiers present in the document (typically Tiers 1-5). Do NOT skip any tier. If a tier row is present in the structured table, extract its value from the In-Network column. Common issue: Some extractors skip Tier 2 or Tier 3. CRITICAL: Count the tiers and ensure all are present in your output. Tiers with values like "$20/Rx", "$100/Rx", "$170/Rx", "40% coinsurance", "$500/Rx" must all be extracted.
 17a. CRITICAL FOR PHARMACY COINSURANCE: If a pharmacy tier ONLY shows a percentage (e.g., "20% coinsurance") and no dollar amount, you MUST put the percentage in the COINSURANCE field and "$0" in the COPAY field. NEVER put a standalone percentage like "0%" or "20%" into a pharmacy copay field.
 18. MULTIPLE VALUES: If a service lists BOTH a copay AND a coinsurance (e.g., "$35 copayment 50% coinsurance"), you MUST extract both and place them into their respective fields. However, if they are separated by a pipe (e.g., "| $35 copay | 50% coinsurance |"), the second value is Out-of-Network and MUST BE IGNORED. Do not extract the Out-of-Network value.
@@ -602,7 +628,7 @@ PHARMACY EXTRACTION RULES:
     - Map "Preferred" Specialty costs to Tier 4.
     - Map "Non-preferred" Specialty costs to Tier 5.
     CRITICAL: If the document ALREADY has explicit Tier 4 (e.g., "$120") and Tier 5 (e.g., "$150") costs, DO NOT overwrite them! Leave Tier 4 and Tier 5 as their explicit values, and just put the specialty costs in specialty_rx_description.
-    - If the text says "maximum copay" (e.g., "$250 maximum copay"), place that value into the corresponding tier_X_maximum field, NOT the regular tier_X_copay field. For example, if it says "$250 (preferred) and $500 (non-preferred) maximum copay", put "$250" in tier_4_maximum and "$500" in tier_5_maximum, and set regular copays to "$0".
+    - If the text says "up to" or "maximum" (e.g., "up to $250" or "$250 maximum copay"), place that value into the corresponding tier_X_maximum field, NOT the regular tier_X_copay field. For example, if it says "up to $250 (preferred) and $500 (non-preferred)", put "$250" in tier_4_maximum and "$500" in tier_5_maximum, and set regular copays to "$0".
     - STILL combine both values (e.g., "20%/40%") into the specialty_rx_description field.
     CRITICAL: If NO specialty drug information exists anywhere in the document, set specialty_rx_description to null (do NOT default to "$0" or use the deductible amount). Extract ONLY from In-Network column, NEVER from Out-of-Network or Limitations columns. Do not overwrite or remove existing copay/coinsurance values from Tiers 1-5; they must coexist with the specialty drug values.
 

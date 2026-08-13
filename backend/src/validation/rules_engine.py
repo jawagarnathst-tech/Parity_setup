@@ -347,7 +347,7 @@ class RulesEngine:
             "er_copay": ["emergency room care", "emergency room", "emergency medical"],
             "urgent_care_copay": ["urgent care"],
             "lab_services_copay": ["diagnostic test", "blood work", "lab"],
-            "xray_copay": ["x-ray", "xray"],
+            "xray_copay": ["x-ray", "xray", "radiology"],
             "medical_imaging_copay": ["imaging", "ct/pet", "mri"],
         }
 
@@ -795,7 +795,7 @@ class RulesEngine:
                 ('hospital_surgical', 'er', ['emergency room care', 'emergency room']),
                 ('urgent_care_labs_imaging', 'urgent_care', ['urgent care']),
                 ('urgent_care_labs_imaging', 'lab_services', ['diagnostic test', 'blood work', 'lab']),
-                ('urgent_care_labs_imaging', 'xray', ['x-ray', 'xray']),
+                ('urgent_care_labs_imaging', 'xray', ['x-ray', 'xray', 'radiology']),
                 ('urgent_care_labs_imaging', 'medical_imaging', ['imaging', 'ct/pet', 'mri']),
             ]
             
@@ -1707,7 +1707,8 @@ class RulesEngine:
                 try:
                     with open(raw_text_path, 'r', encoding='utf-8') as _rf:
                         _raw = _rf.read()
-                    if re.search(r'hospital\s+lab', _raw, re.IGNORECASE) and re.search(r'hospital\s+x-?ray', _raw, re.IGNORECASE):
+                    if (re.search(r'hospital\s+lab|lab\s+facility', _raw, re.IGNORECASE) and
+                            re.search(r'hospital\s+x-?ray|radiology\s+facility|x-?ray\s+facility', _raw, re.IGNORECASE)):
                         has_hospital_lab = True
                 except Exception:
                     pass
@@ -2155,7 +2156,26 @@ class RulesEngine:
                             t1 = str(pharmacy.get('tier_1_copay') or "")
                             t2 = str(pharmacy.get('tier_2_copay') or "")
                             t3 = str(pharmacy.get('tier_3_copay') or "")
-                            if any(tv and tv in current_spec_check for tv in [t1, t2, t3] if tv):
+                            
+                            import re
+                            amounts_regex = r'\$\s*\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s*%'
+                            spec_amounts = re.findall(amounts_regex, current_spec_check)
+                            tier_amounts = []
+                            for t in [t1, t2, t3]:
+                                tier_amounts.extend(re.findall(amounts_regex, t))
+                                
+                            is_mistake = False
+                            if spec_amounts:
+                                # If ALL amounts found in specialty description belong to t1, t2, or t3
+                                # it's likely the LLM mistakenly copied the base tiers
+                                if all(amt in tier_amounts for amt in spec_amounts):
+                                    is_mistake = True
+                            else:
+                                # Fallback if no amounts found
+                                if any(tv and tv in current_spec_check for tv in [t1, t2, t3] if tv):
+                                    is_mistake = True
+
+                            if is_mistake:
                                 corrected_spec = t5_copay_check or t5_coins_check
                                 pharmacy['specialty_rx_description'] = corrected_spec
                                 print(f"    [FIX] Specialty Rx Description: Replaced tier-concatenated '{current_spec_check}' -> '{corrected_spec}' (Tier 5 specialty only)")
@@ -2718,22 +2738,7 @@ class RulesEngine:
                 except Exception as e:
                     print(f"    [WARN] Could not recover missing tiers: {e}")
         
-        # GLOBAL VALIDATION #3: Pharmacy Tier 4 Coinsurance Check (should not be 30% for Anthem)
-        print("\n  [GLOBAL-VAL] Checking pharmacy tier 4 coinsurance...")
-        tier4_coins = pharmacy.get('tier_4_coinsurance')
-        if tier4_coins == '30%' and raw_text_path:
-            # Check if document is Anthem (which uses 40% not 30%)
-            try:
-                with open(raw_text_path, 'r', encoding='utf-8') as rf:
-                    raw_content = rf.read().lower()
-                
-                if 'anthem' in raw_content and '40%' in raw_content:
-                    # This is Anthem with 40% specialty coinsurance
-                    pharmacy['tier_4_coinsurance'] = '40%'
-                    corrections_made.append("Pharmacy Tier 4 coinsurance: Corrected 30% → 40% (Anthem specialty)")
-                    print(f"    [FIX] Tier 4 coinsurance: 30% → 40% (Anthem pattern detected)")
-            except Exception as e:
-                print(f"    [WARN] Could not check Tier 4: {e}")
+
         
         # HDHP final sweep: after all GLOBAL-VAL (including Tier 5 recovery), set correct modifiers
         if hdhp:
