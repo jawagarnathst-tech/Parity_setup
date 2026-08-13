@@ -2567,6 +2567,12 @@ class RulesEngine:
         # Validate Out-of-Network
         print("\n  [SECTION 5/6] Out-of-Network:")
         oon = schema_data.get('out_of_network', {})
+        
+        # User Instruction: If out-of-network coinsurance is "Not Covered", change to "0%"
+        if str(oon.get('coinsurance')).strip().lower() == 'not covered':
+            oon['coinsurance'] = '0%'
+            print("    [FIX] Out-of-Network coinsurance: Changed 'Not Covered' to '0%'")
+            
         print(f"    [OK] Coverage Available: {oon.get('out_of_network_coverage')}")
         print(f"    [OK] Individual Deductible: {oon.get('individual_deductible')}")
         print(f"    [OK] Family Deductible: {oon.get('family_deductible')}")

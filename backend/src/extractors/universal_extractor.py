@@ -527,7 +527,7 @@ STRICT VALUE FORMATTING RULES - Follow these exactly:
 3. NO CHARGE: Convert "No Charge", "no charge", or "Not Applicable" to "$0".
 4. PHARMACY DEDUCTIBLES with Individual/Family: Return ONLY the Individual value. Example: "$150 Individual/$450 Family" -> "$150".
 5. MIXED DOLLAR+PERCENT (e.g. "$200 or 20%"): Return as-is: "$200 or 20%".
-6. NOT COVERED: Return "Not Covered" as-is.
+6. NOT COVERED: Return "Not Covered" as-is. SPECIAL RULE FOR OUT-OF-NETWORK COINSURANCE: If out-of-network coinsurance is "Not Covered" or similar, you MUST return "0%".
 7. DO NOT include words like "copay", "coinsurance", "per visit", "per stay", "after deductible".
 8. COINSURANCE FIELDS: These expect a % value. Example: "20% coinsurance" -> "20%".
 9. COPAY FIELDS: These expect a $ value. Example: "$35 copay" -> "$35".
