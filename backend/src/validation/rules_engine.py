@@ -2580,6 +2580,26 @@ class RulesEngine:
         print(f"    [OK] Family OOP Max: {oon.get('family_oop_max')}")
         print(f"    [OK] Coinsurance: {oon.get('coinsurance')}")
         
+        # Global "Not Covered" conversion for copay/coinsurance fields
+        print("\n  [SECTION 5.5/6] Global 'Not Covered' Conversion:")
+        nc_fixes = 0
+        for section_key, section_data in schema_data.items():
+            if isinstance(section_data, dict):
+                for k, v in section_data.items():
+                    if isinstance(v, str) and v.strip().lower() == 'not covered':
+                        if k.endswith('_copay') or 'copay' in k:
+                            section_data[k] = '$0'
+                            corrections_made.append(f"Changed {section_key}.{k} from 'Not Covered' to '$0'")
+                            nc_fixes += 1
+                        elif k.endswith('_coinsurance') or 'coinsurance' in k:
+                            section_data[k] = '0%'
+                            corrections_made.append(f"Changed {section_key}.{k} from 'Not Covered' to '0%'")
+                            nc_fixes += 1
+        if nc_fixes > 0:
+            print(f"    [FIX] Applied {nc_fixes} 'Not Covered' conversions to $0/0% across all sections.")
+        else:
+            print(f"    [OK] No stray 'Not Covered' values found in cost fields.")
+            
         # JSON Structure Validation
         print("\n  [SECTION 6/6] JSON Structure Validation:")
         required_sections = [
