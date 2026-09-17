@@ -706,6 +706,19 @@ HDHP (High Deductible Health Plan) DETECTION:
                 time.sleep(delay)
         
         result = completion.choices[0].message.parsed
+        
+        try:
+            from core.universal_token_monitor import track_usage
+            track_usage(
+                response_usage=completion.usage,
+                model="gpt-4o-2024-08-06",
+                poc_name="PARITY_SETUP",
+                file_name=getattr(self, 'current_filename', 'unknown_file.pdf'),
+                step_name="universal_extraction"
+            )
+        except Exception as e:
+            print(f"  [LLM] Failed to log token usage: {e}")
+
 
         # Normalize plan name and pharmacy tiers using text-backed rules
         result.plan_information.plan_name = self._extract_plan_name_from_text(
