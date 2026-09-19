@@ -17,6 +17,16 @@ from pathlib import Path
 from dotenv import load_dotenv
 from typing import List
 
+# Add workspace root to sys.path for database module
+_workspace_root = str(Path(__file__).parent.parent.parent.resolve())
+if _workspace_root not in sys.path:
+    sys.path.insert(0, _workspace_root)
+
+try:
+    from database.poc_db import log_universal as _log_uni
+except ImportError:
+    _log_uni = None
+
 from src.extractors.universal_extractor import UniversalExtractor
 from src.validation.rules_engine import RulesEngine
 from src.output.excel_writer import ExcelWriter
@@ -177,6 +187,17 @@ async def extract_file(request: Request, file: UploadFile = File(...)):
         logger.error("No filename provided")
         raise HTTPException(status_code=400, detail="No filename provided")
 
+    processed_by = request.headers.get("X-User-Email") or request.headers.get("x-user-email") or "SYSTEM"
+    
+    if _log_uni:
+        _log_uni(
+            module="SBC Parity", action="extract",
+            status="STARTED",
+            processed_by=processed_by,
+            file_name=file.filename,
+            details="Starting SBC extraction"
+        )
+
     # Validate file type
     allowed_extensions = {'.pdf', '.docx', '.doc', '.jpg', '.jpeg', '.png', '.bmp', '.tiff'}
     file_ext = Path(file.filename).suffix.lower()
@@ -220,10 +241,30 @@ async def extract_file(request: Request, file: UploadFile = File(...)):
         TASKS[task_id]["progress"] = 100
         TASKS[task_id]["results"] = results
         logger.info(f"Extraction Completed Successfully: {file.filename}")
+        
+        if _log_uni:
+            _log_uni(
+                module="SBC Parity", action="extract",
+                status="SUCCESS",
+                processed_by=processed_by,
+                file_name=file.filename,
+                details="SBC extraction completed successfully"
+            )
+            
     except Exception as e:
         logger.error(f"Extraction Failed: {e}")
         TASKS[task_id]["status"] = "failed"
         TASKS[task_id]["error"] = str(e)
+        
+        if _log_uni:
+            _log_uni(
+                module="SBC Parity", action="extract",
+                status="FAILED",
+                processed_by=processed_by,
+                file_name=file.filename,
+                details=f"Error: {str(e)[:100]}"
+            )
+            
         raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
 
     base_url = str(request.base_url).rstrip("/")
