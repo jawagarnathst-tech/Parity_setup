@@ -2,7 +2,18 @@ import pytesseract
 from PIL import Image
 import pdfplumber
 import os
+import sys
+import time
+from pathlib import Path
 from dotenv import load_dotenv
+
+try:
+    import core_gpu
+except ImportError:
+    _root_dir = Path(__file__).resolve().parent.parent.parent.parent
+    if str(_root_dir) not in sys.path:
+        sys.path.insert(0, str(_root_dir))
+    import core_gpu
 
 load_dotenv()
 
@@ -41,7 +52,13 @@ def ocr_pdf_full(pdf_path: str, resolution: int = 300) -> str:
         temp_filename = f"temp_rostaing_{uuid.uuid4().hex}.txt"
         temp_out = os.path.join(temp_dir, temp_filename)
         
+        t0 = time.time()
         ocr_extractor(pdf_path, output_file=temp_out)
+        elapsed = time.time() - t0
+        try:
+            core_gpu.log_ocr_audit("Parity-Setup", "rostaing-ocr", elapsed_sec=elapsed)
+        except Exception:
+            pass
         
         if os.path.exists(temp_out):
             with open(temp_out, "r", encoding="utf-8") as f:
@@ -65,10 +82,17 @@ def ocr_pdf_full(pdf_path: str, resolution: int = 300) -> str:
     try:
         print(f"    [OCR] Processing with pytesseract...")
         with pdfplumber.open(pdf_path) as pdf:
+            total_pgs = len(pdf.pages)
             for i, page in enumerate(pdf.pages):
-                print(f"    [OCR] Processing page {i+1}/{len(pdf.pages)}...")
+                print(f"    [OCR] Processing page {i+1}/{total_pgs}...")
+                t0_p = time.time()
                 page_image = page.to_image(resolution=resolution).original
                 t = pytesseract.image_to_string(page_image, lang='eng').strip()
+                t_elapsed = time.time() - t0_p
+                try:
+                    core_gpu.log_ocr_audit("Parity-Setup", "pytesseract", page_idx=i+1, total_pages=total_pgs, elapsed_sec=t_elapsed)
+                except Exception:
+                    pass
                 if t:
                     text += f"--- PAGE {i+1} OCR TEXT ---\n" + t + "\n"
     except Exception as e:
