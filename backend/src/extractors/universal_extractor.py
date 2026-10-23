@@ -447,7 +447,9 @@ class UniversalExtractor:
             text = ocr_pdf_full(file_path)
         else:
             # If extracted text is very short or has low text density, it's likely a scanned PDF.
+            # Strip --- Page X --- separators before counting so bare headers don't fool us.
             text_for_density = re.sub(r'\(cid:\d+\)', ' ', text)
+            text_for_density = re.sub(r'---\s*Page\s*\d+\s*---', '', text_for_density, flags=re.IGNORECASE)
             alnum_count = len(re.findall(r'[a-zA-Z0-9]', text_for_density))
             avg_alnum_per_page = alnum_count / num_pages
             if alnum_count < 150 or avg_alnum_per_page < 60:
@@ -578,6 +580,9 @@ MEDICAL VALUE SELECTION (HOSPITAL/FACILITY PRIORITY):
 
 PHARMACY EXTRACTION RULES:
 16. PHARMACY TIER VALUES: Use the "STRUCTURED TABLES" provided in the text for accurate column alignment. You MUST extract ONLY the "In-Network Provider" (or "Participating Provider") value for Tiers 1-5. Do not extract Out-of-Network or Non-Participating values. 
+
+⚠️ CRITICAL FOR 30-DAY vs 90-DAY RETAIL:
+If a pharmacy cell contains multiple amounts for different day supplies (e.g., "$15 copay/prescription (retail 30 days), $38 copay/prescription (retail & home delivery 90 days)"), you MUST ALWAYS extract ONLY the 30-day retail value (e.g., "$15"). Ignore the 90-day or home delivery amounts.
 
 ⚠️ CRITICAL FOR PREFERRED VS NON-PREFERRED RETAIL (tier_1 through tier_5 copay and coinsurance ONLY): 
 If a pharmacy tier retail cell lists BOTH "Preferred" and "Non-preferred" costs, you MUST ALWAYS extract the LARGER/NON-PREFERRED value and COMPLETELY IGNORE the Preferred value. 
@@ -803,46 +808,63 @@ HDHP (High Deductible Health Plan) DETECTION:
                 most_common_coinsurance = f"{counter.most_common(1)[0][0]}%"
                 print(f"    [VALIDATION] Most common coinsurance: {most_common_coinsurance}")
             
+            def _in_network_says_no_charge(keywords):
+                """Check if In-Network column for service explicitly says 'No charge' without coinsurance %"""
+                for line in text.split('\n'):
+                    if '|' not in line:
+                        continue
+                    line_lower = line.lower()
+                    if any(kw in line_lower for kw in keywords):
+                        parts = [p.strip() for p in line.split('|')]
+                        non_empty = [p for p in parts if p]
+                        if len(non_empty) >= 2:
+                            svc_idx = next((i for i, p in enumerate(non_empty) if any(kw in p.lower() for kw in keywords)), -1)
+                            if svc_idx != -1 and svc_idx + 1 < len(non_empty):
+                                in_net = non_empty[svc_idx + 1]
+                                if re.search(r'no\s+charge', in_net, re.IGNORECASE) and not re.search(r'\d+\s*%', in_net):
+                                    return True
+                return False
+
             # Validate office visits
             office = result.office_visits
             if office.primary_care_copay == "$0" and office.primary_care_coinsurance in [None, "0%"]:
-                if most_common_coinsurance:
+                if most_common_coinsurance and not _in_network_says_no_charge(["primary care", "injury or illness"]):
                     office.primary_care_coinsurance = most_common_coinsurance
                     print(f"    [FIX] Primary Care: Set coinsurance to {most_common_coinsurance}")
             
             if office.specialist_copay == "$0" and office.specialist_coinsurance in [None, "0%"]:
-                if most_common_coinsurance:
+                if most_common_coinsurance and not _in_network_says_no_charge(["specialist"]):
                     office.specialist_coinsurance = most_common_coinsurance
                     print(f"    [FIX] Specialist: Set coinsurance to {most_common_coinsurance}")
             
             # Validate hospital services
             hospital = result.hospital_surgical
-            for service_name, copay_field, coinsurance_field in [
-                ("Inpatient", "inpatient_copay", "inpatient_coinsurance"),
-                ("Outpatient", "op_hospital_copay", "op_hospital_coinsurance"),
-                ("Emergency Room", "er_copay", "er_coinsurance")
+            for service_name, copay_field, coinsurance_field, kws in [
+                ("Inpatient", "inpatient_copay", "inpatient_coinsurance", ["inpatient", "facility fee", "hospital stay"]),
+                ("Outpatient", "op_hospital_copay", "op_hospital_coinsurance", ["outpatient", "ambulatory"]),
+                ("Emergency Room", "er_copay", "er_coinsurance", ["emergency room"])
             ]:
                 copay_val = getattr(hospital, copay_field, None)
                 coinsurance_val = getattr(hospital, coinsurance_field, None)
                 
                 if copay_val == "$0" and coinsurance_val in [None, "0%"]:
-                    if most_common_coinsurance:
+                    if most_common_coinsurance and not _in_network_says_no_charge(kws):
                         setattr(hospital, coinsurance_field, most_common_coinsurance)
                         print(f"    [FIX] {service_name}: Set coinsurance to {most_common_coinsurance}")
             
             # Validate urgent care & imaging
             imaging = result.urgent_care_labs_imaging
-            for service_name, copay_field, coinsurance_field in [
-                ("Urgent Care", "urgent_care_copay", "urgent_care_coinsurance"),
-                ("Lab Services", "lab_services_copay", "lab_services_coinsurance"),
-                ("X-Ray", "xray_copay", "xray_coinsurance"),
-                ("Medical Imaging", "medical_imaging_copay", "medical_imaging_coinsurance")
+            for service_name, copay_field, coinsurance_field, kws in [
+                ("Urgent Care", "urgent_care_copay", "urgent_care_coinsurance", ["urgent care"]),
+                ("Lab Services", "lab_services_copay", "lab_services_coinsurance", ["diagnostic test", "blood work", "lab"]),
+                ("X-Ray", "xray_copay", "xray_coinsurance", ["x-ray", "xray", "radiology"]),
+                ("Medical Imaging", "medical_imaging_copay", "medical_imaging_coinsurance", ["imaging", "ct/pet", "mri"])
             ]:
                 copay_val = getattr(imaging, copay_field, None)
                 coinsurance_val = getattr(imaging, coinsurance_field, None)
                 
                 if copay_val == "$0" and coinsurance_val in [None, "0%"]:
-                    if most_common_coinsurance:
+                    if most_common_coinsurance and not _in_network_says_no_charge(kws):
                         setattr(imaging, coinsurance_field, most_common_coinsurance)
                         print(f"    [FIX] {service_name}: Set coinsurance to {most_common_coinsurance}")
         

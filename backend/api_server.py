@@ -473,8 +473,10 @@ async def run_extraction(task_id: str, file_path: Path, filename: str):
         TASKS[task_id]["progress"] = 100
         logger.info("  [Pipeline] Step 5: Cleanup & result preparation...")
 
-        carrier = validated_dict.get("plan_information", {}).get("carrier", "Unknown")
-        plan_name = validated_dict.get("plan_information", {}).get("plan_name", "Unknown")
+        plan_info = validated_dict.get("plan_information", {}) or {}
+        carrier = plan_info.get("carrier") or "Unknown"
+        plan_name = plan_info.get("plan_name") or "Unknown"
+        plan_type = plan_info.get("plan_type") or "Unknown"
 
         print(f"\n✅ SUCCESS! Extraction complete for '{filename}'")
         print(f"   ► Carrier: {carrier}")
@@ -484,7 +486,7 @@ async def run_extraction(task_id: str, file_path: Path, filename: str):
         return {
             "carrier": carrier,
             "planName": plan_name,
-            "planType": validated_dict.get("plan_information", {}).get("plan_type", "Unknown"),
+            "planType": plan_type,
             "confidence": confidence,
             "excelPath": str(excel_path),
             "jsonPath": str(json_path),

@@ -1058,6 +1058,7 @@ class RulesEngine:
         _restore_missing_in_network_copays(schema_data, raw_text_lines)
 
         scenario_04_active = False
+        scenario_03_active = False
         if raw_text_full:
             # Check for the exact SBC warning message
             # The warning might have words scattered across lines, so use flexible regex
@@ -2043,31 +2044,24 @@ class RulesEngine:
             specialty_tier_waived = {}  # {tier_num: True/False}
 
             if raw_text_full:
-                # Match patterns like "Specialty Drugs: $10", "Specialty drug: $150 copay"
-                # We scan the raw text looking for Tier-context lines that contain specialty sub-values
-                tier_specialty_pattern = re.compile(
-                    r'specialty\s+drugs?\s*[:\-]?\s*\$\s*([\d,]+(?:\.\d+)?)',
-                    re.IGNORECASE
-                )
-                waived_pattern = re.compile(
-                    r'deductible\s+does\s+not\s+apply|no\s+charge',
-                    re.IGNORECASE
-                )
+                # Match patterns like "Specialty Drugs: $10", "Specialty drug: $150 copay" within Tiers 1-3 In-Network cell
+                waived_pattern = re.compile(r'deductible\s+does\s+not\s+apply|no\s+charge', re.IGNORECASE)
 
-                # Scan raw text line by line looking for tier context then specialty value
-                current_tier = None
                 for line in raw_text_full.split('\n'):
-                    line_stripped = line.strip()
-                    # Detect tier context from the line
-                    tier_match = re.search(r'\btier\s+(\d)\b', line_stripped, re.IGNORECASE)
-                    if tier_match:
-                        current_tier = int(tier_match.group(1))
-
-                    spec_match = tier_specialty_pattern.search(line_stripped)
-                    if spec_match and current_tier and current_tier not in specialty_per_tier:
-                        amount_raw = spec_match.group(1).replace(',', '')
-                        specialty_per_tier[current_tier] = f"${amount_raw}"
-                        specialty_tier_waived[current_tier] = bool(waived_pattern.search(line_stripped))
+                    if '|' not in line:
+                        continue
+                    parts = [p.strip() for p in line.split('|')]
+                    # Must have tier context 1-3 in row description (parts[0])
+                    tier_match = re.search(r'\btier\s+([1-3])\b', parts[0], re.IGNORECASE)
+                    if tier_match and len(parts) > 1:
+                        tier_num = int(tier_match.group(1))
+                        in_net_cell = parts[1]
+                        # Look for explicit sub-entry like "Specialty Drugs: $10" in In-Network cell
+                        spec_match = re.search(r'specialty\s+drugs?\s*[:\-]\s*\$\s*([\d,]+(?:\.\d+)?)', in_net_cell, re.IGNORECASE)
+                        if spec_match and tier_num not in specialty_per_tier:
+                            amount_raw = spec_match.group(1).replace(',', '')
+                            specialty_per_tier[tier_num] = f"${amount_raw}"
+                            specialty_tier_waived[tier_num] = bool(waived_pattern.search(in_net_cell))
 
             # Step 2: Determine which scenario applies
             num_specialty_tiers = len(specialty_per_tier)
@@ -2147,9 +2141,11 @@ class RulesEngine:
                         print("    [FIX] Cleared Specialty Rx Description because Mirrors Tiers 1-3 is False")
                     else:
                         # Check if LLM concatenated all tier values into specialty description
+                        t4_copay_check = pharmacy.get('tier_4_copay')
                         t5_copay_check = pharmacy.get('tier_5_copay')
+                        t4_coins_check = pharmacy.get('tier_4_coinsurance')
                         t5_coins_check = pharmacy.get('tier_5_coinsurance')
-                        specialty_tier_val = t5_copay_check or t5_coins_check
+                        specialty_tier_val = t4_copay_check or t5_copay_check or t4_coins_check or t5_coins_check
                         current_spec_check = str(pharmacy.get('specialty_rx_description') or "")
 
                         if specialty_tier_val and current_spec_check:
@@ -2157,7 +2153,6 @@ class RulesEngine:
                             t2 = str(pharmacy.get('tier_2_copay') or "")
                             t3 = str(pharmacy.get('tier_3_copay') or "")
                             
-                            import re
                             amounts_regex = r'\$\s*\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s*%'
                             spec_amounts = re.findall(amounts_regex, current_spec_check)
                             tier_amounts = []
@@ -2166,19 +2161,17 @@ class RulesEngine:
                                 
                             is_mistake = False
                             if spec_amounts:
-                                # If ALL amounts found in specialty description belong to t1, t2, or t3
-                                # it's likely the LLM mistakenly copied the base tiers
-                                if all(amt in tier_amounts for amt in spec_amounts):
+                                # If multiple amounts found in specialty description and they match base tiers
+                                if len(spec_amounts) > 1 and any(amt in tier_amounts for amt in spec_amounts):
                                     is_mistake = True
                             else:
-                                # Fallback if no amounts found
                                 if any(tv and tv in current_spec_check for tv in [t1, t2, t3] if tv):
                                     is_mistake = True
 
                             if is_mistake:
-                                corrected_spec = t5_copay_check or t5_coins_check
+                                corrected_spec = specialty_tier_val
                                 pharmacy['specialty_rx_description'] = corrected_spec
-                                print(f"    [FIX] Specialty Rx Description: Replaced tier-concatenated '{current_spec_check}' -> '{corrected_spec}' (Tier 5 specialty only)")
+                                print(f"    [FIX] Specialty Rx Description: Replaced tier-concatenated '{current_spec_check}' -> '{corrected_spec}' (Specialty tier only)")
 
             # Clean deductible language from specialty description; keep only amount(s).
             spec_desc_val = str(pharmacy.get('specialty_rx_description') or "").strip()

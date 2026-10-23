@@ -7,14 +7,14 @@ class HealthResponse(BaseModel):
     version: str = Field(..., description="Version of the API", example="1.0.0")
 
 class ExtractionResult(BaseModel):
-    carrier: str = Field(..., description="Extracted carrier name")
-    planName: str = Field(..., description="Extracted plan name")
-    planType: str = Field(..., description="Extracted plan type")
-    confidence: float = Field(..., description="Overall confidence score for the extraction (0-100)")
-    excelPath: str = Field(..., description="Path to the generated Excel file on the server")
-    jsonPath: str = Field(..., description="Path to the generated JSON file on the server")
+    carrier: Optional[str] = Field("Unknown", description="Extracted carrier name")
+    planName: Optional[str] = Field("Unknown", description="Extracted plan name")
+    planType: Optional[str] = Field("Unknown", description="Extracted plan type")
+    confidence: Optional[float] = Field(0.0, description="Overall confidence score for the extraction (0-100)")
+    excelPath: Optional[str] = Field(None, description="Path to the generated Excel file on the server")
+    jsonPath: Optional[str] = Field(None, description="Path to the generated JSON file on the server")
     flags: List[str] = Field(default_factory=list, description="Any validation warnings or flags")
-    planData: Dict[str, Any] = Field(..., description="Validated JSON with Plan_Information_List array")
+    planData: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Validated JSON with Plan_Information_List array")
 
 class JobStatus(BaseModel):
     task_id: str = Field(..., description="Unique identifier for the extraction task")
