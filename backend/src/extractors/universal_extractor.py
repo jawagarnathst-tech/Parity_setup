@@ -688,7 +688,7 @@ HDHP (High Deductible Health Plan) DETECTION:
         for attempt in range(max_retries):
             try:
                 completion = self.client.beta.chat.completions.parse(
-                    model="gpt-4o-2024-08-06",
+                    model="gpt-5.6-terra",
                     messages=[
                         {"role": "system", "content": "You are a precise data extraction expert reading SBC health insurance documents. You MUST follow the formatting rules provided by the user exactly."},
                         {"role": "user", "content": prompt}

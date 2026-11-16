@@ -54,7 +54,7 @@ try:
 
             if _is_async:
                 async def _wrapped_parse_async(self, *args, _orig=_orig_parse, **kwargs):
-                    model = kwargs.get("model", "gpt-4o")
+                    model = kwargs.get("model", "gpt-5.6-terra")
                     if "messages" in kwargs and isinstance(kwargs["messages"], list):
                         try:
                             kwargs["messages"] = optimize_messages_for_caching(kwargs["messages"], model=str(model))
@@ -81,7 +81,7 @@ try:
                 _cls.parse = _wrapped_parse_async
             else:
                 def _wrapped_parse_sync(self, *args, _orig=_orig_parse, **kwargs):
-                    model = kwargs.get("model", "gpt-4o")
+                    model = kwargs.get("model", "gpt-5.6-terra")
                     if "messages" in kwargs and isinstance(kwargs["messages"], list):
                         try:
                             kwargs["messages"] = optimize_messages_for_caching(kwargs["messages"], model=str(model))
